@@ -6,7 +6,7 @@ Usage: python dedupe_cli.py input.csv [output.csv]
 
 import sys
 from pathlib import Path
-from tools import process_csv
+from pipeline.tools import process_csv
 
 
 def main():

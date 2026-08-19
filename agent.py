@@ -6,7 +6,7 @@
 from google.adk.agents import Agent
 from google.adk.tools import FunctionTool
 from google.genai import types
-from .tools import run_dedup_pipeline
+from .pipeline.tools import run_dedup_pipeline
 
 MAX_CSV_CHARS = 2_000_000
 

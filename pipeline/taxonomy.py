@@ -1,12 +1,9 @@
-"""
-taxonomy_loader.py
-Loads reference_taxonomy.md into dictionary maps.
-"""
+"""Load data/reference_taxonomy.md into section → {alias: canonical} maps."""
 
 from pathlib import Path
 import re
 
-TAXONOMY_FILE = Path(__file__).parent / "reference_taxonomy.md"
+TAXONOMY_FILE = Path(__file__).resolve().parent.parent / "data" / "reference_taxonomy.md"
 
 
 def _alias_key(value: str) -> str:

@@ -1,6 +1,6 @@
 # Reference Taxonomy
 
-Alias tables only. `taxonomy_loader.py` reads each `##` section as `{alias: canonical}`.
+Alias tables only. `pipeline/taxonomy.py` reads each `##` section as `{alias: canonical}`.
 
 ## Title
 

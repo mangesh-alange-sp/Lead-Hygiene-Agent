@@ -8,14 +8,9 @@ import pandas as pd
 from google.adk.tools import ToolContext
 from google.genai import types
 
-try:
-    from .validate import validate_dataframe
-    from .normalize import normalize_dataframe
-    from .dedupe import deduplicate_dataframe
-except ImportError:
-    from validate import validate_dataframe
-    from normalize import normalize_dataframe
-    from dedupe import deduplicate_dataframe
+from .dedupe import deduplicate_dataframe
+from .normalize import normalize_dataframe
+from .validate import validate_dataframe
 
 MAX_ROWS = 5000
 MAX_CSV_CHARS = 2_000_000

@@ -9,10 +9,7 @@ from urllib.parse import urlparse, urlunparse
 import pandas as pd
 import phonenumbers
 
-try:
-    from .taxonomy_loader import TAXONOMY
-except ImportError:
-    from taxonomy_loader import TAXONOMY
+from .taxonomy import TAXONOMY
 
 SOCIAL_HOSTS = {
     "facebook.com", "twitter.com", "x.com", "linkedin.com",
