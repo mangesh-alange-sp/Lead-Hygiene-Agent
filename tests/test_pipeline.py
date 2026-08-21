@@ -1,0 +1,314 @@
+"""
+End-to-end tests for validate → normalize → dedupe.
+
+The hand-built fixture is a bootstrap: its tricky rows are inputs that exercise
+the rules, not a frozen expected-output file. Per-rule coverage lives in
+test_phone_rules / test_casing_rules / test_website_rules / test_dedupe_rules.
+"""
+
+import csv
+import io
+import unittest
+from pathlib import Path
+
+import pandas as pd
+
+from pipeline.invariants import check_records
+from pipeline.tools import process_csv
+from pipeline.validate import validate_dataframe
+
+FIXTURES = Path(__file__).parent / "fixtures"
+INPUT_CSV = FIXTURES / "lead_data_with_duplicates.csv"
+
+
+def _load_result():
+    result = process_csv(INPUT_CSV.read_text(encoding="utf-8"))
+    assert result["status"] == "ok", result.get("message")
+    return result, pd.read_csv(io.StringIO(result["csv"]), dtype=str).fillna("")
+
+
+class SchemaTests(unittest.TestCase):
+    def test_output_columns_match_the_source_exactly(self):
+        source = pd.read_csv(INPUT_CSV, dtype=str)
+        _, out = _load_result()
+        self.assertEqual(list(out.columns), list(source.columns))
+
+    def test_no_audit_columns_leak_into_the_output(self):
+        result, out = _load_result()
+        internal = {
+            "merged_from_ids", "match_signals_used", "confidence_score",
+            "data_quality_flags", "hitl_review", "decision",
+        }
+        self.assertTrue(internal.isdisjoint(out.columns))
+        self.assertNotIn("merged_from_ids", result["csv"].splitlines()[0])
+
+    def test_audit_information_goes_to_the_side_file(self):
+        result, _ = _load_result()
+        audit = list(csv.DictReader(io.StringIO(result["audit_csv"])))
+        self.assertTrue(audit)
+        self.assertIn("merged_from_ids", audit[0])
+        self.assertIn("match_signals_used", audit[0])
+        self.assertEqual(result["audit_file"], "dedup_log.csv")
+
+    def test_csv_export_hygiene(self):
+        result, _ = _load_result()
+        raw = result["csv"]
+        self.assertFalse(raw.startswith("\ufeff"))
+        header = raw.splitlines()[0]
+        self.assertTrue(header.startswith("Id,"))
+        self.assertNotIn('"', header)
+
+    def test_underscore_header_is_not_quote_wrapped(self):
+        csv_in = "_,Id,Email,Phone,Country\nLead,00Q1,a@acme.com,2065550100,US\n"
+        result = process_csv(csv_in)
+        self.assertEqual(result["status"], "ok", result.get("message"))
+        self.assertEqual(result["csv"].splitlines()[0].split(",")[0], "_")
+
+
+class BatchInvariantTests(unittest.TestCase):
+    def test_written_batch_satisfies_every_invariant(self):
+        result, out = _load_result()
+        self.assertEqual(
+            check_records(out.to_dict("records"), rows_in=result["leads_in"]), []
+        )
+        self.assertEqual(result["invariant_violations"], [])
+
+    def test_row_count_never_grows(self):
+        result, _ = _load_result()
+        self.assertLessEqual(result["leads_out"], result["leads_in"])
+        self.assertEqual(
+            result["leads_in"] - result["leads_out"],
+            result["duplicates_merged"] + result.get("records_dropped", 0),
+        )
+
+    def test_no_phone_carries_an_excel_marker(self):
+        result, _ = _load_result()
+        for row in csv.DictReader(io.StringIO(result["csv"])):
+            phone = row.get("Phone") or ""
+            self.assertFalse(phone.startswith("'"), row.get("Id"))
+            self.assertFalse(bool(phone) and phone[0] in "+=-@", row.get("Id"))
+
+    def test_invariant_gate_blocks_a_broken_transformation(self):
+        from unittest.mock import patch
+
+        with patch("pipeline.tools.strip_excel_artifacts", lambda value: "'" + str(value)):
+            result = process_csv(INPUT_CSV.read_text(encoding="utf-8"))
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(any("text marker" in v for v in result["invariant_violations"]))
+        self.assertNotIn("csv", result)
+
+    def test_pipeline_is_idempotent(self):
+        result, _ = _load_result()
+        second = process_csv(result["csv"])
+        self.assertEqual(second["status"], "ok", second.get("message"))
+        self.assertEqual(second["csv"], result["csv"])
+
+
+class TrickyRowTests(unittest.TestCase):
+    """The known-hard records from earlier review passes, asserted as rules."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.result, out = _load_result()
+        cls.rows = out.set_index("Id")
+
+    def phone(self, lead_id):
+        return str(self.rows.loc[lead_id, "Phone"])
+
+    def test_domain_casing_in_company(self):
+        self.assertEqual(self.rows.loc["00Q001", "Company"], "Amazon.com Inc.")
+
+    def test_acronyms_survive_the_pipeline(self):
+        expected = {
+            "00Q017": "L&T Construction",
+            "00Q018": "ASML Netherlands B.V.",
+            "00Q019": "NCI Information Systems",
+            "00Q020": "BCBS Association",
+            "00Q023": "CEA",
+        }
+        for lead_id, company in expected.items():
+            with self.subTest(lead_id=lead_id):
+                self.assertEqual(self.rows.loc[lead_id, "Company"], company)
+        self.assertTrue(str(self.rows.loc["00Q016", "Company"]).startswith("R.O.C"))
+
+    def test_country_signals_win_over_us_default(self):
+        expected = {
+            "00Q011": "(+886)",  # Kuo-Tung Lin, .com.tw email
+            "00Q012": "(+33)",   # Stephane Leprince, France
+            "00Q017": "(+91)",   # Raj Patel, India
+            "00Q018": "(+31)",   # Anja Visser, explicit +31
+            "00Q023": "(+44)",   # Terry Ng, 44 prefix
+            "00Q024": "(+33)",
+            "00Q025": "(+60)",
+            "00Q026": "(+81)",
+            "00Q027": "(+81)",
+        }
+        for lead_id, prefix in expected.items():
+            with self.subTest(lead_id=lead_id):
+                self.assertTrue(
+                    self.phone(lead_id).startswith(prefix),
+                    f"{lead_id} -> {self.phone(lead_id)}",
+                )
+                if prefix != "(+1)":
+                    self.assertFalse(self.phone(lead_id).startswith("(+1)"))
+
+    def test_us_numbers_still_format(self):
+        self.assertEqual(self.phone("00Q001"), "(+1) 206-555-0100")
+
+    def test_phones_use_national_grouping(self):
+        self.assertEqual(self.phone("00Q012"), "(+33) 1-67-45-82-14")
+        self.assertEqual(self.phone("00Q017"), "(+91) 22-1234-5678")
+        self.assertEqual(self.phone("00Q023"), "(+44) 7911-123456")
+        self.assertEqual(self.phone("00Q024"), "(+33) 6-12-34-56-78")
+        self.assertEqual(self.phone("00Q027"), "(+81) 3-1234-5678")
+
+    def test_mcdonalds_uses_the_brand_canonical(self):
+        self.assertEqual(self.rows.loc["00Q002", "Company"], "McDonald's")
+
+    def test_placeholder_emails_are_cleared(self):
+        for lead_id in ("00Q011", "00Q014", "00Q015"):
+            with self.subTest(lead_id=lead_id):
+                self.assertEqual(self.rows.loc[lead_id, "Email"], "")
+
+    def test_test_com_rows_are_dropped(self):
+        self.assertNotIn("00Q013", self.rows.index)
+        self.assertGreaterEqual(self.result.get("records_dropped", 0), 1)
+
+    def test_socgen_website_is_kept_for_societe_generale(self):
+        self.assertEqual(self.rows.loc["00Q012", "Website"], "https://socgen.com")
+
+    def test_lt_email_domain_becomes_the_website(self):
+        self.assertEqual(self.rows.loc["00Q017", "Website"], "https://larsentoubro.com")
+
+    def test_title_acronyms_are_not_title_cased(self):
+        self.assertEqual(self.rows.loc["00Q001", "Title"], "PM")
+        self.assertEqual(self.rows.loc["00Q010", "Title"], "PM")
+        self.assertEqual(self.rows.loc["00Q019", "Title"], "PM")
+
+    def test_industry_aliases_map_to_canonical(self):
+        self.assertEqual(self.rows.loc["00Q002", "Industry"], "Food & Beverage")
+        self.assertEqual(self.rows.loc["00Q011", "Industry"], "Semiconductor")
+        self.assertEqual(self.rows.loc["00Q008", "Industry"], "Technology")
+
+    def test_empty_country_is_inferred_from_the_phone(self):
+        self.assertEqual(self.rows.loc["00Q023", "Country"], "United Kingdom")
+        self.assertEqual(self.rows.loc["00Q024", "Country"], "France")
+        self.assertEqual(self.rows.loc["00Q025", "Country"], "Malaysia")
+        self.assertEqual(self.rows.loc["00Q026", "Country"], "Japan")
+        self.assertEqual(self.rows.loc["00Q027", "Country"], "Japan")
+
+    def test_held_rows_are_still_normalized(self):
+        self.assertEqual(self.rows.loc["00Q008", "Country"], "United States")
+        self.assertEqual(self.rows.loc["00Q008", "Industry"], "Technology")
+        self.assertEqual(self.rows.loc["00Q008", "Company"], "")
+
+    def test_output_keeps_source_row_order(self):
+        ids = [str(i) for i in self.rows.index]
+        self.assertLess(ids.index("00Q008"), ids.index("00Q010"))
+        self.assertLess(ids.index("00Q007"), ids.index("00Q008"))
+
+    def test_placeholder_contact_name_is_nulled(self):
+        self.assertEqual(self.rows.loc["00Q008", "FirstName"], "")
+        self.assertEqual(self.rows.loc["00Q008", "LastName"], "")
+
+    def test_field_merge_keeps_the_fuller_email(self):
+        self.assertEqual(self.rows.loc["00Q002", "Email"], "lee.bailey@us.mcd.com")
+
+    def test_acronym_company_matches_its_email_domain(self):
+        self.assertEqual(self.rows.loc["00Q019", "Website"], "https://nciinc.com")
+
+    def test_company_small_words_are_lowercased(self):
+        self.assertEqual(
+            self.rows.loc["00Q016", "Company"],
+            "R.O.C Military Academy Department of Politics",
+        )
+
+    def test_unresolvable_websites_are_nulled(self):
+        # test.com, wonka.com, stinks.com, r.o.c, yahoo.in: nothing legitimate to derive.
+        for lead_id in ("00Q014", "00Q015", "00Q016", "00Q022"):
+            with self.subTest(lead_id=lead_id):
+                self.assertEqual(self.rows.loc[lead_id, "Website"], "")
+
+    def test_websites_that_contradict_the_company_are_not_kept(self):
+        # Source values gmail.com / microsoft.com / oracle.com must not survive;
+        # a value derived from the matching corporate email domain may replace them.
+        from pipeline.domains import domain_matches_company, host_of
+
+        for lead_id, rejected in (
+            ("00Q007", "gmail.com"), ("00Q010", "microsoft.com"), ("00Q021", "oracle.com"),
+        ):
+            site = str(self.rows.loc[lead_id, "Website"])
+            with self.subTest(lead_id=lead_id):
+                self.assertNotIn(rejected, site)
+                if site:
+                    self.assertTrue(
+                        domain_matches_company(host_of(site), self.rows.loc[lead_id, "Company"]),
+                        f"{lead_id} kept {site} for {self.rows.loc[lead_id, 'Company']}",
+                    )
+
+    def test_garbage_name_is_nulled(self):
+        self.assertEqual(self.rows.loc["00Q006", "FirstName"], "")
+
+    def test_exact_email_duplicates_collapse(self):
+        self.assertNotIn("DUPE001", self.rows.index)
+        self.assertNotIn("DUPE003", self.rows.index)
+
+    def test_shared_phone_pair_is_kept_for_review(self):
+        self.assertIn("00Q004", self.rows.index)
+        self.assertIn("00Q005", self.rows.index)
+        self.assertGreater(self.result["hitl_records"], 0)
+
+
+class NameNormalizeTests(unittest.TestCase):
+    def test_honorifics_and_initials(self):
+        from pipeline.normalize import normalize_name
+
+        self.assertEqual(normalize_name("Mr. John", "Smith"), ("John", "Smith"))
+        self.assertEqual(normalize_name("Jk", "Ng"), ("J.K.", "Ng"))
+        self.assertEqual(normalize_name("Gokul", "S"), ("Gokul", "S."))
+        self.assertEqual(normalize_name("Gokul", "S."), ("Gokul", "S."))
+        self.assertEqual(normalize_name("Kuo-Tung", "Lin"), ("Kuo-Tung", "Lin"))
+        self.assertEqual(normalize_name("Stéphane", "Leprince"), ("Stéphane", "Leprince"))
+
+
+class ValidateTests(unittest.TestCase):
+    def test_plus_prefix_survives_validation(self):
+        df = pd.DataFrame({
+            "FirstName": ["Jane"], "LastName": ["Doe"],
+            "Email": ["jane@amazon.com"], "Phone": ["+1-206-555-0100"],
+            "Company": ["Amazon"],
+        })
+        out, _ = validate_dataframe(df)
+        self.assertEqual(out.at[0, "Phone"], "+1-206-555-0100")
+
+    def test_excel_marker_is_stripped_on_read(self):
+        df = pd.DataFrame({
+            "FirstName": ["Jane"], "LastName": ["Doe"],
+            "Email": ["jane@amazon.com"], "Phone": ["'+1-206-555-0100"],
+            "Company": ["Amazon"],
+        })
+        out, _ = validate_dataframe(df)
+        self.assertEqual(out.at[0, "Phone"], "+1-206-555-0100")
+
+    def test_hard_required_failure_is_held_for_review(self):
+        df = pd.DataFrame({
+            "Id": ["00Q001"], "FirstName": ["No"], "LastName": ["Contact"],
+            "Email": [""], "Phone": [""], "Company": ["Missing Co"],
+        })
+        out, _ = validate_dataframe(df)
+        self.assertIn("missing_hard_required", out.at[0, "data_quality_flags"])
+        self.assertEqual(out.at[0, "hitl_review"], "Yes")
+
+
+class GuardrailTests(unittest.TestCase):
+    def test_missing_email_column_is_rejected(self):
+        result = process_csv("Id,Phone\n00Q1,2065550100\n")
+        self.assertEqual(result["status"], "error")
+
+    def test_unparseable_input_is_rejected(self):
+        result = process_csv('Id,Email\n"unterminated,quote\n')
+        self.assertIn(result["status"], {"ok", "error"})
+
+
+if __name__ == "__main__":
+    unittest.main()

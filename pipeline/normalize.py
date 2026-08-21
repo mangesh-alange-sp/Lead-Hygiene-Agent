@@ -1,35 +1,81 @@
 """
 normalize.py
-Rewrites field values in place without adding extra columns.
+Taxonomy-driven field normalization plus the DataFrame walker.
+
+Phone, company casing, and website derivation live in their own modules
+(phone.py, casing.py, website.py); this module only orchestrates them so a fix
+to one transformation cannot reach into another.
 """
 
 import re
-from urllib.parse import urlparse, urlunparse
 
 import pandas as pd
-import phonenumbers
 
+from .casing import normalize_company_casing
+from .config import REGION_TO_COUNTRY, TITLE_ACRONYMS
+from .domains import company_match_key
+from .phone import infer_region, is_international_format, normalize_phone
 from .taxonomy import TAXONOMY
-
-SOCIAL_HOSTS = {
-    "facebook.com", "twitter.com", "x.com", "linkedin.com",
-    "instagram.com", "youtube.com", "tiktok.com",
-}
-
-
-def _cell(value) -> str:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return ""
-    text = str(value).strip()
-    return "" if text.lower() in {"nan", "none", "nat", "n/a", "unknown", "-", "--"} else text
+from .textnorm import alias_key, cell as _cell
+from .website import resolve_website
 
 
 def _tax_key(value: str) -> str:
-    return re.sub(r"[,.]", "", (value or "").strip().lower())
+    return alias_key(value)
 
 
 def _lookup(section: str, value: str):
     return TAXONOMY.get(section, {}).get(_tax_key(value))
+
+
+def infer_phone_region(email: str = "", country: str = "", phone: str = "") -> str:
+    """Kept for callers that only need the region signal."""
+    mapped = _lookup("country", country) or _cell(country)
+    return infer_region(email=email, country=mapped, phone=phone)
+
+
+def _format_initial(value: str, *, allow_digraph: bool = False) -> str:
+    """Single letter or dotted initial -> 'J.'; optional 'Jk' (no vowel) -> 'J.K.'."""
+    text = value.strip()
+    if re.fullmatch(r"[A-Za-z]\.*", text):
+        return f"{text[0].upper()}."
+    if (
+        allow_digraph
+        and re.fullmatch(r"[A-Za-z][a-z]", text)
+        and not re.search(r"[aeiou]", text, re.I)
+    ):
+        return f"{text[0].upper()}.{text[1].upper()}."
+    return ""
+
+
+def _case_name_token(token: str, *, allow_digraph: bool = False) -> str:
+    if not token:
+        return token
+    initial = _format_initial(token, allow_digraph=allow_digraph)
+    if initial:
+        return initial
+    leading = re.match(r"^[^A-Za-z]*", token).group(0)
+    trailing = re.search(r"[^A-Za-z]*$", token).group(0)
+    bare = token[len(leading):len(token) - len(trailing)] if trailing else token[len(leading):]
+    if not bare:
+        return token
+    if "-" in bare:
+        return leading + "-".join(
+            _case_name_token(part, allow_digraph=allow_digraph) for part in bare.split("-")
+        ) + trailing
+    if "." in bare:
+        labels = [(part[:1].upper() + part[1:].lower()) if part else "" for part in bare.split(".")]
+        rendered = ".".join(labels)
+        if trailing.startswith(".") and rendered.endswith("."):
+            trailing = trailing[1:]
+        return leading + rendered + trailing
+    if "'" in bare or "’" in bare:
+        sep = "'" if "'" in bare else "’"
+        head, tail = re.split(r"['’]", bare, maxsplit=1)
+        return leading + head[:1].upper() + head[1:].lower() + sep + (tail[:1].upper() + tail[1:].lower() if tail else "") + trailing
+    titled = bare[:1].upper() + bare[1:].lower()
+    titled = re.sub(r"^Mc([a-z])", lambda m: "Mc" + m.group(1).upper(), titled)
+    return leading + titled + trailing
 
 
 def normalize_name(first_name: str, last_name: str) -> tuple:
@@ -37,151 +83,86 @@ def normalize_name(first_name: str, last_name: str) -> tuple:
     fn = _cell(first_name)
     ln = _cell(last_name)
 
-    fn = re.sub(r"^(Mr\.|Ms\.|Mrs\.|Dr\.|Jr\.|Sr\.)\s+", "", fn, flags=re.IGNORECASE)
+    fn = re.sub(
+        r"^(Mr|Ms|Mrs|Miss|Dr|Prof|Sir|Jr|Sr)\.?\s+",
+        "",
+        fn,
+        flags=re.IGNORECASE,
+    )
 
-    if re.match(r"^[A-Za-z][a-z]$", fn) and not re.search(r"[aeiou]", fn, re.I):
-        fn = f"{fn[0].upper()}.{fn[1].upper()}."
-
-    return fn.title() if fn else "", ln.title() if ln else ""
-
-
-COUNTRY_CALLING = (
-    "971", "966", "81", "82", "86", "91", "61", "65", "44", "49",
-    "33", "31", "32", "34", "39", "41", "43", "46", "47", "48",
-    "52", "55", "62", "63", "66", "90", "92", "93", "94", "95",
-    "20", "27", "1",
-)
-
-
-def _phone_digits(text: str) -> str:
-    return re.sub(r"\D", "", text or "")
-
-
-def _format_us(digits: str) -> str:
-    return f"+1-{digits[0:3]}-{digits[3:6]}-{digits[6:10]}"
-
-
-def _format_e164(e164: str) -> str:
-    if e164.startswith("+1") and len(e164) == 12:
-        return _format_us(e164[2:])
-    digits = e164[1:] if e164.startswith("+") else e164
-    if digits.startswith("44") and len(digits) == 12 and digits[2] == "7":
-        rest = digits[2:]
-        return f"+44-{rest[0:4]}-{rest[4:7]}-{rest[7:10]}"
-    for cc in COUNTRY_CALLING:
-        if digits.startswith(cc) and len(digits) > len(cc) + 4:
-            return f"+{cc}-{digits[len(cc):]}"
-    return e164 if e164.startswith("+") else "+" + digits
-
-
-def _try_parse_phone(raw: str, region, require_valid: bool = False) -> str:
-    try:
-        parsed = phonenumbers.parse(raw, region)
-    except Exception:
-        return ""
-    if not phonenumbers.is_possible_number(parsed):
-        return ""
-    if require_valid and not phonenumbers.is_valid_number(parsed):
-        return ""
-    e164 = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
-    return _format_e164(e164)
-
-
-def normalize_phone(phone_raw: str, default_region: str = "US") -> str:
-    """Format phones; blank dummy or too-short values."""
-    raw = _cell(phone_raw)
-    if not raw:
-        return ""
-    digits = _phone_digits(raw)
-    if not digits or set(digits) <= {"0"} or raw in {"000-000-000", "1234567890"}:
-        return ""
-    if len(digits) < 7:
-        return ""
-
-    candidates = []
-    if raw.startswith("+") or raw.startswith("00"):
-        candidates.append(_try_parse_phone(raw, None))
-    candidates.append(_try_parse_phone(raw, default_region))
-    if digits.startswith("0"):
-        for region in ("GB", "DE", "FR", "IN", "JP"):
-            candidates.append(_try_parse_phone(raw, region, require_valid=True))
-    for formatted in candidates:
-        if formatted:
-            return formatted
-
-    if digits.startswith("0"):
-        national = digits.lstrip("0")
-        if len(national) == 10 and national.startswith("7"):
-            return f"+44-{national[0:4]}-{national[4:7]}-{national[7:10]}"
-        digits = national
-        if len(digits) < 7:
-            return ""
-
-    if len(digits) == 11 and digits.startswith("1"):
-        return _format_us(digits[1:])
-    if len(digits) == 10 and not (phone_raw or "").strip().startswith("0"):
-        return _format_us(digits)
-
-    for cc in COUNTRY_CALLING:
-        if digits.startswith(cc) and len(digits) > len(cc) + 4:
-            return f"+{cc}-{digits[len(cc):]}"
-    return "+" + digits
+    fn_parts = [_case_name_token(part, allow_digraph=True) for part in fn.split() if part]
+    ln_parts = [_case_name_token(part, allow_digraph=False) for part in ln.split() if part]
+    return " ".join(fn_parts), " ".join(ln_parts)
 
 
 def normalize_company(company_raw: str) -> str:
-    """Maps company to canonical taxonomy or cleans legal suffixes."""
+    """Canonical taxonomy value when known, otherwise allowlist-driven casing."""
     raw_clean = _cell(company_raw)
     if not raw_clean:
         return ""
-
     if _lookup("invalid", raw_clean) == "INVALID":
         return ""
-
     mapped = _lookup("company", raw_clean)
     if mapped:
         return mapped
-
-    cleaned = re.sub(r"\.{2,}", ".", raw_clean)
-    cleaned = re.sub(r"\band\b", "&", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\bInc\.\.\b", "Inc.", cleaned, flags=re.IGNORECASE)
-    return cleaned.title()
+    # "McDonald's GmbH" / "bcbs association" should still hit the brand alias.
+    brand_key = company_match_key(raw_clean)
+    company_tax = TAXONOMY.get("company", {})
+    mapped = company_tax.get(brand_key) or company_tax.get(brand_key.replace(" ", ""))
+    if mapped:
+        return mapped
+    return normalize_company_casing(raw_clean)
 
 
 def normalize_title(title_raw: str) -> str:
-    """Applies title taxonomy or title cases job titles."""
+    """Applies title taxonomy or title cases job titles, keeping configured acronyms."""
     raw_clean = _cell(title_raw)
     if not raw_clean:
         return ""
+    raw_clean = _primary_title(raw_clean)
 
     mapped = _lookup("title", raw_clean)
     if mapped:
         return mapped
 
     title_tax = TAXONOMY.get("title", {})
-    words = raw_clean.split()
-    norm_words = [title_tax.get(_tax_key(w), w.capitalize()) for w in words]
-    return " ".join(norm_words)
+    words = []
+    for word in raw_clean.split():
+        key = _tax_key(word)
+        if key in title_tax:
+            words.append(title_tax[key])
+            continue
+        match = re.match(r"^([.,]*)([^.,]+)([.,]*)$", word)
+        if match:
+            core = match.group(2)
+            if core.upper() in TITLE_ACRONYMS:
+                words.append(f"{match.group(1)}{core.upper()}{match.group(3)}")
+                continue
+        words.append(word.capitalize())
+    rendered = " ".join(words)
+    if is_low_quality_title(rendered):
+        compact = re.sub(r"[.]", "", rendered)
+        return compact.upper()
+    return rendered
 
 
-def normalize_website(url_raw: str) -> str:
-    """Standardizes URLs to https://host with no path or tracking params."""
-    url = _cell(url_raw)
-    if not url:
-        return ""
-    if "@" in url and "://" not in url:
-        return ""
-    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
-        url = f"https://{url}"
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return ""
-    host = (parsed.hostname or "").lower()
-    if host.startswith("www."):
-        host = host[4:]
-    if not host or host in SOCIAL_HOSTS:
-        return ""
-    return urlunparse(("https", host, "", "", "", ""))
+def _primary_title(value: str) -> str:
+    """Keep the job title before LinkedIn-style '| role | scope' stuffing."""
+    if "|" not in value:
+        return value
+    parts = [part.strip() for part in value.split("|") if part.strip()]
+    return parts[0] if parts else value
+
+
+def is_low_quality_title(title) -> bool:
+    """True for unexplained 2-3 letter titles such as 'Ats' that are not known acronyms."""
+    text = _cell(title)
+    if not text:
+        return False
+    compact = re.sub(r"[.]", "", text)
+    if not re.fullmatch(r"[A-Za-z]{2,3}", compact):
+        return False
+    return compact.upper() not in TITLE_ACRONYMS
 
 
 def _apply_map(section: str, value: str, title_case: bool = False) -> str:
@@ -249,9 +230,26 @@ def _set_if_changed(df, idx, field, new_value, old_value) -> int:
     return 0
 
 
+def _add_flag(current: str, flag: str) -> str:
+    flags = [part for part in (current or "").split("|") if part]
+    if flag not in flags:
+        flags.append(flag)
+    return "|".join(flags)
+
+
+def _flag_row(df, idx, flag: str, *, hitl: bool = False):
+    if "data_quality_flags" in df.columns:
+        df.at[idx, "data_quality_flags"] = _add_flag(df.at[idx, "data_quality_flags"], flag)
+    if hitl and "hitl_review" in df.columns:
+        df.at[idx, "hitl_review"] = "Yes"
+
+
 def normalize_dataframe(df: pd.DataFrame) -> tuple:
     """Normalizes all fields in place and returns (df, normalized_values_count)."""
     df = df.copy()
+    for col in ("data_quality_flags", "hitl_review"):
+        if col not in df.columns:
+            df[col] = ""
     norm_count = 0
 
     for idx, row in df.iterrows():
@@ -261,29 +259,41 @@ def normalize_dataframe(df: pd.DataFrame) -> tuple:
 
         email = _cell(row.get("Email", "")).lower()
         norm_count += _set_if_changed(df, idx, "Email", email, row.get("Email"))
+        country = _apply_map("country", row.get("Country"), True)
+        company = normalize_company(row.get("Company"))
 
-        norm_count += _set_if_changed(
-            df, idx, "Company", normalize_company(row.get("Company")), row.get("Company")
-        )
-        norm_count += _set_if_changed(
-            df, idx, "Title", normalize_title(row.get("Title")), row.get("Title")
-        )
-        norm_count += _set_if_changed(
-            df, idx, "Phone", normalize_phone(row.get("Phone")), row.get("Phone")
-        )
+        phone = normalize_phone(row.get("Phone"), email=email, company=company, country=country) or ""
+        if not country:
+            region = infer_region(email=email, country="", phone=phone or row.get("Phone", ""))
+            if region:
+                country = REGION_TO_COUNTRY.get(region, "")
+                phone = (
+                    normalize_phone(row.get("Phone"), email=email, company=company, country=country)
+                    or phone
+                )
+
+        norm_count += _set_if_changed(df, idx, "Company", company, row.get("Company"))
+        title = normalize_title(row.get("Title"))
+        norm_count += _set_if_changed(df, idx, "Title", title, row.get("Title"))
+        if is_low_quality_title(title):
+            _flag_row(df, idx, "low_quality_title", hitl=True)
+        norm_count += _set_if_changed(df, idx, "Phone", phone, row.get("Phone"))
+        if phone and not is_international_format(phone):
+            _flag_row(df, idx, "unformatted_phone", hitl=True)
         if "MobilePhone" in df.columns:
-            norm_count += _set_if_changed(
-                df, idx, "MobilePhone", normalize_phone(row.get("MobilePhone")), row.get("MobilePhone")
-            )
+            mobile = normalize_phone(row.get("MobilePhone"), email=email, company=company, country=country) or ""
+            norm_count += _set_if_changed(df, idx, "MobilePhone", mobile, row.get("MobilePhone"))
+            if mobile and not is_international_format(mobile):
+                _flag_row(df, idx, "unformatted_phone", hitl=True)
         norm_count += _set_if_changed(
-            df, idx, "Website", normalize_website(row.get("Website")), row.get("Website")
+            df, idx, "Website",
+            resolve_website(row.get("Website"), company, email) or "",
+            row.get("Website"),
         )
         norm_count += _set_if_changed(
             df, idx, "Industry", _apply_map("industry", row.get("Industry"), True), row.get("Industry")
         )
-        norm_count += _set_if_changed(
-            df, idx, "Country", _apply_map("country", row.get("Country"), True), row.get("Country")
-        )
+        norm_count += _set_if_changed(df, idx, "Country", country, row.get("Country"))
         norm_count += _set_if_changed(
             df, idx, "State", _apply_map("state", row.get("State"), True), row.get("State")
         )
