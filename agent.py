@@ -9,17 +9,19 @@
 from google.adk.agents import Agent
 from google.adk.tools import FunctionTool
 from google.genai import types
-from .pipeline.tools import lookup_lead, run_dedup_pipeline
+
+from .pipeline.tools import lookup_lead, run_dedup_pipeline,search_and_enrich
+
 
 MAX_CSV_CHARS = 2_000_000
 
 
-def dedup_guardrail_callback(tool, args, tool_context):
-    if tool.name != "run_dedup_pipeline":
+def hygiene_guardrail_callback(tool, args, tool_context):
+    if tool.name not in {"run_dedup_pipeline", "search_and_enrich"}:
         return None
 
     csv_text = args.get("csv_text") or ""
-    if len(csv_text) > MAX_CSV_CHARS:
+    if csv_text and len(csv_text) > MAX_CSV_CHARS:
         return {
             "status": "error",
             "message": f"CSV input too large ({len(csv_text)} chars). "
@@ -111,14 +113,15 @@ If technical_log and field_diff_lines are both empty, write: None
 """
 
 root_agent = Agent(
-    name="lead_hygiene",
+    name="lead_hygiene_agent",
     model="gemini-2.5-flash",
     instruction=SYSTEM_PROMPT,
     tools=[
         FunctionTool(func=run_dedup_pipeline),
+        FunctionTool(func=search_and_enrich),
         FunctionTool(func=lookup_lead),
     ],
-    before_tool_callback=dedup_guardrail_callback,
+    before_tool_callback=hygiene_guardrail_callback,
     generate_content_config=types.GenerateContentConfig(
         temperature=0.0,
     ),
