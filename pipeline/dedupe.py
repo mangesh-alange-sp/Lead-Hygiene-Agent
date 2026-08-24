@@ -29,7 +29,10 @@ HIGH_MIN = 90
 # similarity is never enough, including "both rows look like test data".
 IDENTITY_SIGNALS = frozenset({"exact_email", "name+company", "name+phone"})
 # Written by validate/dedupe for internal routing; never part of the output CSV.
-INTERNAL_FIELDS = ("data_quality_flags", "hitl_review", "phone_status", "Phone_raw")
+INTERNAL_FIELDS = (
+    "data_quality_flags", "hitl_review", "phone_status", "phone_reason",
+    "Phone_raw", "completeness_flag", "email_status",
+)
 
 
 def normalized_email(value) -> str:

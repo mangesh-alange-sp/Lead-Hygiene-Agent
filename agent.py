@@ -98,13 +98,16 @@ If hitl_records is 0, write: None
 Otherwise summarize flag_counts in plain English
 (for example: 8 leads missing email, 3 phones could not be
 standardized). Do not list individual Salesforce Ids.
+Always add one line from summary.phone_states, for example:
+"Phones: 74 validated to E.164, 9 need review."
 
 TECHNICAL LOG
 Copy every summary.technical_log entry as: id — reasons
 (phone_status in parentheses when present).
-If summary.field_diffs is not empty, list each as
-id field: from -> to and STOP — do not treat the run as delivered.
-If technical_log is empty and field_diffs is empty, write: None
+If summary.field_diff_lines is not empty, list every line verbatim and
+STOP — the write-back was blocked and needs review, so do not say the
+file is ready.
+If technical_log and field_diff_lines are both empty, write: None
 """
 
 root_agent = Agent(

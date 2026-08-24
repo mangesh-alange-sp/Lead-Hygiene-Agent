@@ -3,6 +3,7 @@
 import csv
 import io
 import unittest
+from pathlib import Path
 
 from pipeline.dedupe import dedupe_leads, score_pair
 from pipeline.phone import parse_phone
@@ -26,7 +27,7 @@ class SingaporePhoneTests(unittest.TestCase):
 
     def test_sprinklr_with_sg_tld_infers_65(self):
         parsed = parse_phone("98006498", email="user@sprinklr.com.sg")
-        self.assertEqual(parsed["value"], "+65-9800-6498")
+        self.assertEqual(parsed["value"], "+6598006498")
         self.assertEqual(parsed["status"], "valid")
 
 
@@ -92,6 +93,74 @@ class SyntheticDupePairTests(unittest.TestCase):
         for i in range(1, 12):
             pair = {f"DUPEA{i:03d}", f"DUPEB{i:03d}"}
             self.assertEqual(len(pair.intersection({s["Id"] for s in survivors})), 1)
+
+
+class WebsitePrecedenceTests(unittest.TestCase):
+    def test_email_domain_wins_when_company_is_not_in_any_lookup(self):
+        # Prosegur is not in the lookup table; the email domain must still win
+        # and must never be nulled by a lookup miss.
+        csv_in = (
+            "Id,FirstName,LastName,Email,Phone,Company,Website\n"
+            "00Q1,Mehmet,Arikan,mehmet.arikan@sap.com,,Prosegur,\n"
+        )
+        result = process_csv(csv_in)
+        self.assertEqual(result["status"], "ok", result.get("message"))
+        row = next(csv.DictReader(io.StringIO(result["csv"])))
+        self.assertEqual(row["Website"], "https://sap.com")
+
+    def test_existing_valid_website_survives_a_lookup_miss(self):
+        csv_in = (
+            "Id,FirstName,LastName,Email,Phone,Company,Website\n"
+            "00Q1,Ana,Ruiz,ana@prosegur.com,,Prosegur,https://www.prosegur.com/careers\n"
+        )
+        result = process_csv(csv_in)
+        self.assertEqual(result["status"], "ok", result.get("message"))
+        row = next(csv.DictReader(io.StringIO(result["csv"])))
+        self.assertEqual(row["Website"], "https://prosegur.com")
+
+
+class RegressionDiffTests(unittest.TestCase):
+    def test_diff_returns_id_field_old_new_tuples(self):
+        from pipeline.regression import FieldChange, diff_records
+
+        baseline = {"00Q1": {"Id": "00Q1", "Phone": "+447771695127", "Email": "a@acme.com"}}
+        current = {"00Q1": {"Id": "00Q1", "Phone": "07771695127", "Email": "a@acme.com"}}
+        changes = diff_records(baseline, current)
+        self.assertEqual(changes, [FieldChange("00Q1", "Phone", "+447771695127", "07771695127")])
+        lead_id, field, old, new = changes[0]
+        self.assertEqual((lead_id, field, old, new),
+                         ("00Q1", "Phone", "+447771695127", "07771695127"))
+
+    def test_new_and_dropped_ids_are_not_regressions(self):
+        from pipeline.regression import diff_records
+
+        baseline = {"00Q1": {"Id": "00Q1", "Phone": "+447771695127"}}
+        current = {"00Q2": {"Id": "00Q2", "Phone": "+12065550100"}}
+        self.assertEqual(diff_records(baseline, current), [])
+
+    def test_pipeline_blocks_delivery_when_a_field_changed(self):
+        import asyncio
+
+        from pipeline.tools import run_dedup_pipeline
+
+        class _Ctx:
+            def __init__(self):
+                self.state = {}
+                self.saved = []
+
+            async def save_artifact(self, filename, artifact):
+                self.saved.append(filename)
+                return 1
+
+        golden = Path("tests/fixtures/golden_deduped.csv").read_text(encoding="utf-8")
+        # A title change survives normalization, so it reaches the diff gate.
+        tampered = golden.replace(",PM,", ",Director,", 1)
+        self.assertNotEqual(tampered, golden)
+        ctx = _Ctx()
+        out = asyncio.run(run_dedup_pipeline(tampered, ctx))
+        self.assertEqual(out["status"], "error")
+        self.assertTrue(out["field_diffs"])
+        self.assertEqual(ctx.saved, [], "no artifact may be saved on a blocked run")
 
 
 class ChangeReasonTests(unittest.TestCase):

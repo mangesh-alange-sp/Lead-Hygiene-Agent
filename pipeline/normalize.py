@@ -13,7 +13,7 @@ import pandas as pd
 
 from .casing import normalize_company_casing
 from .config import REGION_TO_COUNTRY, TITLE_ACRONYMS
-from .phone import infer_region, parse_phone
+from .phone import STATUS_NONE, infer_region, parse_phone
 from .taxonomy import TAXONOMY, resolve_company_alias
 from .textnorm import alias_key, cell as _cell
 from .website import resolve_website_with_reason
@@ -240,7 +240,10 @@ def _flag_row(df, idx, flag: str, *, hitl: bool = False):
 def normalize_dataframe(df: pd.DataFrame) -> tuple:
     """Normalizes all fields in place and returns (df, normalized_values_count)."""
     df = df.copy()
-    for col in ("data_quality_flags", "hitl_review", "phone_status", "Phone_raw", "change_reasons"):
+    for col in (
+        "data_quality_flags", "hitl_review", "phone_status", "phone_reason",
+        "Phone_raw", "change_reasons", "completeness_flag", "email_status",
+    ):
         if col not in df.columns:
             df[col] = ""
     norm_count = 0
@@ -261,10 +264,22 @@ def normalize_dataframe(df: pd.DataFrame) -> tuple:
             if region:
                 country = REGION_TO_COUNTRY.get(region, "")
                 parsed = parse_phone(row.get("Phone"), email=email, company=company, country=country)
+        # Validation may have already cleared a junk phone and stashed the
+        # submitted value. Re-read it so the discard stays visible as a state
+        # instead of looking like a field that arrived empty. Re-parsing junk
+        # always yields an empty value, so nothing is resurrected.
+        stashed = _cell(row.get("Phone_raw", ""))
+        if parsed["status"] == STATUS_NONE and stashed:
+            parsed = parse_phone(stashed, email=email, company=company, country=country)
+
         phone = parsed["value"] or ""
-        df.at[idx, "Phone_raw"] = parsed["raw"]
+        df.at[idx, "Phone_raw"] = parsed["raw"] or stashed
         df.at[idx, "phone_status"] = parsed["status"] or ""
-        reasons = [parsed["reason"]] if parsed.get("reason") else []
+        df.at[idx, "phone_reason"] = parsed.get("reason") or ""
+        # Reasons recorded upstream (email validation) must survive.
+        reasons = [part for part in [_cell(row.get("change_reasons", ""))] if part]
+        if parsed.get("reason"):
+            reasons.append(parsed["reason"])
 
         norm_count += _set_if_changed(df, idx, "Company", company, row.get("Company"))
         title = normalize_title(row.get("Title"))

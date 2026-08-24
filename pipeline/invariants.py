@@ -39,11 +39,12 @@ def phone_has_text_marker(value) -> bool:
     return text.startswith("'") or text.startswith("\t")
 
 
-_PLUS_CC_RE = re.compile(r"^\+\d{1,3}-")
+# E.164 (+447771695127) and the legacy dashed form are both real phone shapes.
+_PLUS_CC_RE = re.compile(r"^\+\d[\d-]*$")
 
 
 def phone_looks_like_excel_formula(value) -> bool:
-    """Flag = @ and non-phone '+' / '-'. Established +CC-… output is allowed."""
+    """Flag = @ and non-phone '+' / '-'. A leading +CC phone number is allowed."""
     text = "" if value is None else str(value)
     if not text:
         return False
@@ -57,12 +58,24 @@ def phone_looks_like_excel_formula(value) -> bool:
 
 
 def phone_lost_country_code(raw, cleaned) -> bool:
-    """True when the input had a country code and the output does not."""
+    """
+    True when the input carried a country code and the output no longer does.
+
+    An unchanged value still carries whatever the source supplied (including a
+    00-prefixed form), and a value cleared as junk is a separate, deliberate
+    decision flagged as garbage_phone. Neither counts as a lost country code.
+    """
     from .phone import input_has_calling_code, is_international_format
+    from .textnorm import digits_only
 
     if not input_has_calling_code(raw):
         return False
-    return not is_international_format(cleaned) and not str(cleaned or "").startswith("+")
+    out = cell(cleaned)
+    if not out:
+        return False
+    if is_international_format(out):
+        return False
+    return digits_only(out) != digits_only(raw)
 
 
 def company_has_bad_dotted_case(value) -> bool:

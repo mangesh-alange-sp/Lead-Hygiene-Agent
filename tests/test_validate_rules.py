@@ -104,8 +104,23 @@ class AdditiveValidationRules(unittest.TestCase):
         })
         out, _ = validate_dataframe(df)
         self.assertIn("incomplete_profile", out.at[0, "data_quality_flags"])
-        self.assertIn("completeness_flag", out.at[0, "data_quality_flags"])
+        self.assertEqual(
+            out.at[0, "completeness_flag"], "missing:Title|Industry|AnnualRevenue"
+        )
         self.assertNotEqual(out.at[0, "hitl_review"], "Yes")
+        # Informational only: the record itself is untouched.
+        self.assertEqual(out.at[0, "Email"], "pat@acme.com")
+        self.assertEqual(out.at[0, "Company"], "Acme")
+
+    def test_completeness_flag_is_blank_when_nothing_is_missing(self):
+        df = pd.DataFrame({
+            "Id": ["00Q1"], "FirstName": ["Pat"], "LastName": ["Lee"],
+            "Email": ["pat@acme.com"], "Phone": ["4155550100"],
+            "Company": ["Acme"], "Title": ["PM"], "Industry": ["Technology"],
+            "AnnualRevenue": ["1000"],
+        })
+        out, _ = validate_dataframe(df)
+        self.assertEqual(out.at[0, "completeness_flag"], "")
 
     def test_short_phone_is_flagged_for_country_review(self):
         df = pd.DataFrame({

@@ -15,7 +15,9 @@ from .dedupe import deduplicate_dataframe
 from .invariants import check_exported_schema, check_records, phone_lost_country_code
 from .normalize import normalize_dataframe
 from .domains import company_match_key, host_of
-from .regression import diff_against_golden
+from .phone import STATUS_NEEDS_REVIEW
+from .regression import as_dicts, diff_against_golden, format_changes
+from .schema import check_output_schema
 from .textnorm import cell, digits_only, fold_text, strip_excel_artifacts
 from .validate import is_junk_lead_values, validate_dataframe
 from .website import normalize_website, resolve_website
@@ -24,7 +26,10 @@ MAX_ROWS = 5000
 MAX_CSV_CHARS = 2_000_000
 MAX_FIELD_EXAMPLES = 12
 MAX_CHANGE_ROWS = 400
-INTERNAL_COLS = ("data_quality_flags", "hitl_review", "phone_status", "Phone_raw", "change_reasons")
+INTERNAL_COLS = (
+    "data_quality_flags", "hitl_review", "phone_status", "phone_reason",
+    "Phone_raw", "change_reasons", "completeness_flag", "email_status",
+)
 PHONE_WRITE_COLS = ("Phone", "MobilePhone")
 AUDIT_FIELDS = (
     "surviving_lead_id",
@@ -34,6 +39,10 @@ AUDIT_FIELDS = (
     "confidence_score",
     "decision",
     "data_quality_flags",
+    # Phone resolution is visible per record: valid vs needs_review, plus why.
+    "phone_status",
+    "phone_reason",
+    "phone_raw",
 )
 
 
@@ -58,6 +67,38 @@ def _write_salesforce_csv(df: pd.DataFrame, columns) -> str:
     return output.getvalue().lstrip("\ufeff")
 
 
+def _excel_text_guard(value: str) -> str:
+    """
+    Wrap a value so Excel and Sheets render it literally.
+
+    A CSV field starting with +, -, = or @ is parsed as a formula, so a correct
+    E.164 number like +12065550100 is evaluated and displayed as 12065550100 —
+    the plus is in the file but never on screen. The ="..." form is the one
+    spelling both applications render verbatim.
+
+    Review copies only. The Salesforce write-back must stay unwrapped.
+    """
+    text = cell(value)
+    if text[:1] in {"+", "-", "=", "@"}:
+        return '="' + text.replace('"', '""') + '"'
+    return text
+
+
+def _write_excel_safe_csv(df: pd.DataFrame, columns) -> str:
+    """
+    The finished frame with phone columns guarded for spreadsheet viewing.
+
+    Carries a UTF-8 BOM. Excel assumes a legacy codepage for a BOM-less file and
+    mojibakes accented names (Büchert, König), so the byte order mark is what
+    makes this copy readable. The write-back stays BOM-free for Salesforce.
+    """
+    guarded = df.copy()
+    for col in PHONE_WRITE_COLS:
+        if col in guarded.columns:
+            guarded[col] = guarded[col].map(_excel_text_guard)
+    return "\ufeff" + _write_salesforce_csv(guarded, columns)
+
+
 def _clean_column_name(name) -> str:
     """Strip BOM/wrapping quotes only; do not rename source headings."""
     text = str(name).replace("\ufeff", "").strip()
@@ -78,8 +119,11 @@ def _build_audit_log(df: pd.DataFrame, merge_log: list) -> str:
     for _, record in df.iterrows():
         lead_id = str(record.get("Id", "") or "")
         flags = str(record.get("data_quality_flags", "") or "")
+        phone_status = cell(record.get("phone_status", ""))
         entry = by_id.pop(lead_id, None)
-        if not entry and not flags:
+        # A resolved phone still gets a line, so "validated, done" is visible
+        # in the data rather than inferred from the value's shape.
+        if not entry and not flags and not phone_status:
             continue
         entry = entry or {}
         rows.append({
@@ -90,6 +134,9 @@ def _build_audit_log(df: pd.DataFrame, merge_log: list) -> str:
             "confidence_score": entry.get("confidence_score", ""),
             "decision": entry.get("decision") or _audit_decision(flags),
             "data_quality_flags": flags,
+            "phone_status": phone_status,
+            "phone_reason": cell(record.get("phone_reason", "")),
+            "phone_raw": cell(record.get("Phone_raw", "")),
         })
     # Ids that were merged away still deserve a log line.
     for lead_id, entry in by_id.items():
@@ -101,6 +148,9 @@ def _build_audit_log(df: pd.DataFrame, merge_log: list) -> str:
             "confidence_score": entry.get("confidence_score", ""),
             "decision": entry.get("decision", ""),
             "data_quality_flags": "",
+            "phone_status": "",
+            "phone_reason": "",
+            "phone_raw": "",
         })
 
     output = io.StringIO()
@@ -439,6 +489,8 @@ def _build_run_summary(source_df, writable, merge_log, audit_rows, counts) -> di
         "files": [
             "deduped.csv — Salesforce write-back (same columns as the upload)",
             "dedup_log.csv — merges, dropped test rows, and review flags",
+            "deduped_excel_review.csv — same rows, phones readable in Excel "
+            "(review only, do not import)",
         ],
         "merges": merges,
         "merge_lines": [merge["line"] for merge in merges],
@@ -453,7 +505,9 @@ def _build_run_summary(source_df, writable, merge_log, audit_rows, counts) -> di
         "flag_counts": _flag_counts(audit_rows),
         "directory": directory,
         "technical_log": counts.get("technical_log") or [],
+        "phone_states": counts.get("phone_states") or {},
         "field_diffs": counts.get("field_diffs") or [],
+        "field_diff_lines": counts.get("field_diff_lines") or [],
     }
 
 
@@ -474,6 +528,17 @@ def format_run_summary(summary: dict) -> str:
     if totals.get("hitl_records"):
         lines.append(f"HITL review: {totals['hitl_records']}")
     lines.append("dedup_log.csv is ready.")
+    states = summary.get("phone_states") or {}
+    if states:
+        lines.append(
+            "Phones: "
+            + ", ".join(f"{count} {state}" for state, count in sorted(states.items()))
+        )
+        lines.append(
+            "  deduped.csv holds bare E.164 (+12065550100) for Salesforce. Excel "
+            "hides the leading + on that form, so use deduped_excel_review.csv to "
+            "eyeball phones."
+        )
     if summary.get("merges"):
         lines.append("Merges:")
         for line in summary.get("merge_lines") or [merge.get("line", "") for merge in summary["merges"]]:
@@ -516,6 +581,7 @@ def _agent_facing_summary(summary: dict) -> dict:
         "flag_counts": summary.get("flag_counts", {}),
         "technical_log": summary.get("technical_log", []),
         "field_diffs": summary.get("field_diffs", []),
+        "field_diff_lines": summary.get("field_diff_lines", []),
         "instruction": (
             "What changed must be copied from critical_lines only. "
             "Do not list company casing, industry maps, title expansions, "
@@ -583,7 +649,7 @@ def _enforce_phone_website_gates(source_df: pd.DataFrame, df_out: pd.DataFrame) 
         if "Phone" in df_out.columns and phone_lost_country_code(src.get("Phone"), row.get("Phone")):
             raw = cell(src.get("Phone"))
             df_out.at[idx, "Phone"] = raw
-            df_out.at[idx, "phone_status"] = "needs_review"
+            df_out.at[idx, "phone_status"] = STATUS_NEEDS_REVIEW
             df_out.at[idx, "hitl_review"] = "Yes"
             flags = cell(df_out.at[idx, "data_quality_flags"])
             if "needs_country_code_review" not in flags.split("|"):
@@ -621,6 +687,17 @@ def _technical_log_rows(df: pd.DataFrame) -> list:
     return rows
 
 
+def _phone_state_counts(df: pd.DataFrame) -> dict:
+    """How many phones ended up validated vs still needing a human."""
+    if "phone_status" not in df.columns:
+        return {}
+    counts = {}
+    for value in df["phone_status"].map(cell):
+        if value:
+            counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
 def _fill_websites(df: pd.DataFrame) -> pd.DataFrame:
     """Run website resolution on every row, including HITL-held records."""
     if "Website" not in df.columns:
@@ -633,7 +710,14 @@ def _fill_websites(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def process_csv(csv_text: str) -> dict:
+def process_csv(csv_text: str, accept_changes: bool = False) -> dict:
+    """
+    Run the pipeline end to end.
+
+    Pass accept_changes=True only to regenerate the known-good baseline; it is
+    the one way to get output past the regression gate, and it makes accepting a
+    diff an explicit act rather than an unnoticed one.
+    """
     if len(csv_text) > MAX_CSV_CHARS:
         return {
             "status": "error",
@@ -733,18 +817,39 @@ def process_csv(csv_text: str) -> dict:
             "invariant_violations": violations,
         }
 
-    csv_text_out = _write_salesforce_csv(writable, source_cols)
-    schema_violations = check_exported_schema(
-        csv_text_out, [_export_header(col) for col in source_cols],
-    )
+    expected_headers = [_export_header(col) for col in source_cols]
+    schema_violations = check_output_schema(writable, source_cols, internal=df_out)
     if schema_violations:
         return {
             "status": "error",
-            "message": "Output blocked by invariant checks: " + "; ".join(schema_violations),
+            "message": "Output blocked by the pandera schema gate: "
+            + "; ".join(schema_violations),
             "invariant_violations": schema_violations,
         }
 
-    field_diffs = diff_against_golden(csv_text_out)
+    csv_text_out = _write_salesforce_csv(writable, source_cols)
+    export_violations = check_exported_schema(csv_text_out, expected_headers)
+    if export_violations:
+        return {
+            "status": "error",
+            "message": "Output blocked by invariant checks: " + "; ".join(export_violations),
+            "invariant_violations": export_violations,
+        }
+
+    field_changes = diff_against_golden(csv_text_out)
+    field_diffs = as_dicts(field_changes)
+    if field_changes and not accept_changes:
+        return {
+            "status": "error",
+            "message": (
+                f"Output blocked by the regression gate: {len(field_changes)} field "
+                "change(s) on Ids that also exist in the last known-good output. "
+                "Review each one, then re-run with accept_changes=True to move the "
+                "baseline."
+            ),
+            "invariant_violations": format_changes(field_changes),
+            "field_diffs": field_diffs,
+        }
     counts = {
         "leads_in": leads_in,
         "leads_out": len(df_out),
@@ -755,13 +860,17 @@ def process_csv(csv_text: str) -> dict:
         "hitl_records": hitl_records,
         "blank_email_kept": blank_email_count,
         "technical_log": _technical_log_rows(df_out),
+        "phone_states": _phone_state_counts(df_out),
         "field_diffs": field_diffs,
+        "field_diff_lines": format_changes(field_changes),
     }
     summary = _build_run_summary(df, writable, merge_log, audit_rows, counts)
 
     return {
         "status": "ok",
         "csv": csv_text_out,
+        "excel_csv": _write_excel_safe_csv(writable, source_cols),
+        "excel_file": "deduped_excel_review.csv",
         "audit_csv": audit_csv,
         "audit_file": "dedup_log.csv",
         "leads_in": leads_in,
@@ -792,20 +901,23 @@ async def run_dedup_pipeline(csv_text: str, tool_context: ToolContext) -> dict:
     """
     result = process_csv(csv_text)
     if result["status"] != "ok":
+        field_diffs = result.get("field_diffs") or []
+        if field_diffs:
+            # Re-word the gate for the agent: it has no way to accept a diff, so
+            # the only correct move is to report the changes and stop.
+            return {
+                "status": "error",
+                "message": (
+                    f"Output blocked: {len(field_diffs)} field change(s) on Ids that "
+                    "already exist in the last known-good baseline. Each one needs "
+                    "explicit review before this run can be delivered."
+                ),
+                "field_diffs": field_diffs,
+                "field_diff_lines": result.get("invariant_violations", []),
+            }
         return result
 
     summary = result["summary"]
-    field_diffs = result.get("field_diffs") or summary.get("field_diffs") or []
-    if field_diffs:
-        return {
-            "status": "error",
-            "message": (
-                "Output blocked: unreviewed field changes vs last known-good "
-                "fixture. Review field_diffs before delivering write-back."
-            ),
-            "field_diffs": field_diffs,
-            "summary": _agent_facing_summary(summary),
-        }
 
     tool_context.state["leads_in"] = result["leads_in"]
     tool_context.state["leads_out"] = result["leads_out"]
@@ -849,6 +961,12 @@ async def run_dedup_pipeline(csv_text: str, tool_context: ToolContext) -> dict:
             data=result["audit_csv"].encode("utf-8"), mime_type="text/csv; charset=utf-8"
         )
         await tool_context.save_artifact(filename="dedup_log.csv", artifact=log_part)
+        review_part = types.Part.from_bytes(
+            data=result["excel_csv"].encode("utf-8"), mime_type="text/csv; charset=utf-8"
+        )
+        await tool_context.save_artifact(
+            filename=result["excel_file"], artifact=review_part
+        )
         return payload
     except Exception:
         return {

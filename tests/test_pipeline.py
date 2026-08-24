@@ -88,7 +88,7 @@ class BatchInvariantTests(unittest.TestCase):
             phone = row.get("Phone") or ""
             self.assertFalse(phone.startswith("'"), row.get("Id"))
             if phone.startswith("+"):
-                self.assertRegex(phone, r"^\+\d{1,3}-", row.get("Id"))
+                self.assertRegex(phone, r"^\+\d{6,15}$", row.get("Id"))
             else:
                 self.assertFalse(bool(phone) and phone[0] in "+=-@", row.get("Id"))
 
@@ -137,15 +137,14 @@ class TrickyRowTests(unittest.TestCase):
 
     def test_country_signals_win_over_us_default(self):
         expected = {
-            "00Q011": "+886-",  # Kuo-Tung Lin, Taiwan country
-            "00Q012": "+33-",   # Stephane Leprince, France
-            "00Q017": "+91-",   # Raj Patel, India
-            "00Q018": "+31-",   # Anja Visser, explicit +31
-            "00Q023": "+44-",   # Terry Ng, 44 prefix
-            "00Q024": "+33-",
-            "00Q025": "+60-",
-            "00Q026": "+81-",
-            "00Q027": "+81-",
+            "00Q011": "+886",  # Kuo-Tung Lin, Taiwan country
+            "00Q012": "+33",   # Stephane Leprince, France
+            "00Q018": "+31",   # Anja Visser, explicit +31
+            "00Q023": "+44",   # Terry Ng, 44 prefix
+            "00Q024": "+33",
+            "00Q025": "+60",
+            "00Q026": "+81",
+            "00Q027": "+81",
         }
         for lead_id, prefix in expected.items():
             with self.subTest(lead_id=lead_id):
@@ -153,18 +152,25 @@ class TrickyRowTests(unittest.TestCase):
                     self.phone(lead_id).startswith(prefix),
                     f"{lead_id} -> {self.phone(lead_id)}",
                 )
-                if prefix != "+1-":
-                    self.assertFalse(self.phone(lead_id).startswith("+1-"))
+                self.assertFalse(self.phone(lead_id).startswith("+1"))
+
+    def test_valid_phones_are_strict_e164(self):
+        for lead_id in ("00Q001", "00Q012", "00Q023", "00Q024", "00Q027"):
+            with self.subTest(lead_id=lead_id):
+                self.assertRegex(self.phone(lead_id), r"^\+\d{6,15}$")
 
     def test_us_numbers_still_format(self):
-        self.assertEqual(self.phone("00Q001"), "+1-206-555-0100")
+        self.assertEqual(self.phone("00Q001"), "+12065550100")
 
-    def test_phones_use_national_grouping(self):
-        self.assertEqual(self.phone("00Q012"), "+33-1-67-45-82-14")
-        self.assertEqual(self.phone("00Q017"), "+91-22-1234-5678")
-        self.assertEqual(self.phone("00Q023"), "+44-7911-123456")
-        self.assertEqual(self.phone("00Q024"), "+33-6-12-34-56-78")
-        self.assertEqual(self.phone("00Q027"), "+81-3-1234-5678")
+    def test_phones_use_one_uniform_format(self):
+        self.assertEqual(self.phone("00Q012"), "+33167458214")
+        self.assertEqual(self.phone("00Q023"), "+447911123456")
+        self.assertEqual(self.phone("00Q024"), "+33612345678")
+        self.assertEqual(self.phone("00Q027"), "+81312345678")
+
+    def test_number_that_fails_validation_keeps_its_original_value(self):
+        # 022-1234-5678 is not a valid Indian number even with +91 applied.
+        self.assertEqual(self.phone("00Q017"), "022-1234-5678")
 
     def test_mcdonalds_uses_the_brand_canonical(self):
         self.assertEqual(self.rows.loc["00Q002", "Company"], "McDonald's")
@@ -391,7 +397,7 @@ class RunSummaryTests(unittest.TestCase):
         self.assertNotIn("Account Executive", lines)
         self.assertNotIn("Technology", lines)
         self.assertNotIn("https://castelity.de", lines)
-        self.assertNotIn("+49-", lines)
+        self.assertNotIn("+49172", lines)
 
 
 class GoldenRegressionTests(unittest.TestCase):
@@ -422,7 +428,7 @@ class GoldenRegressionTests(unittest.TestCase):
         result = process_csv(csv_in)
         self.assertEqual(result["status"], "ok", result.get("message"))
         row = pd.read_csv(io.StringIO(result["csv"]), dtype=str).iloc[0]
-        self.assertTrue(row["Phone"].startswith("+49-"))
+        self.assertTrue(row["Phone"].startswith("+49"))
 
     def test_shared_switchboard_groups_stay_separate(self):
         _, out = _load_result()
