@@ -53,7 +53,7 @@ class UnformattedPhoneFlagRules(unittest.TestCase):
             "Company": ["Societe Generale"], "Country": ["France"],
         })
         out, _ = normalize_dataframe(df)
-        self.assertEqual(out.at[0, "Phone"], "(+33) 1-67-45-82-14")
+        self.assertEqual(out.at[0, "Phone"], "+33167458214")
         self.assertNotIn("unformatted_phone", str(out.at[0, "data_quality_flags"]))
 
 

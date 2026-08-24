@@ -12,7 +12,6 @@ becomes a Website unless the Company name independently resolves to a real domai
 
 from .domains import (
     DOMAIN_TOKEN_RE,
-    domain_matches_company,
     host_of,
     is_personal_domain,
     is_placeholder_domain,
@@ -36,6 +35,7 @@ def normalize_website(raw_website):
         return None
     if not is_plausible_domain(host):
         return None
+    # host_of already dropped www. and the path/trailing slash.
     return f"https://{host}"
 
 
@@ -52,34 +52,44 @@ def website_from_company(company):
 
 
 def website_from_email(company, email):
-    """
-    Email host is a fallback only when it is a real corporate domain AND either
-    the Company is unknown or the host demonstrably belongs to that Company.
-    """
+    """Corporate email host only. Personal/placeholder hosts never become a Website."""
     host = email_domain(email)
     if not host or not is_plausible_domain(host):
         return None
-    company_text = cell(company)
-    if not company_text:
-        return normalize_website(host)
-    if domain_matches_company(host, company_text):
-        return normalize_website(host)
-    return None
+    if is_personal_domain(host) or is_placeholder_domain(host):
+        return None
+    return normalize_website(host)
 
 
 def derive_website(company="", email=""):
-    """Derive a website from Company first, then Email. Returns None rather than guessing."""
-    return website_from_company(company) or website_from_email(company, email)
+    """Email domain first, then a domain token already in the company name."""
+    return website_from_email(company, email) or website_from_company(company)
 
 
 def resolve_website(existing="", company="", email=""):
-    """Keep a trustworthy existing value, otherwise derive one."""
+    """
+    Precedence: keep a valid existing website, else email domain, else company
+    token. A lookup miss must never delete a value that step 1 or 2 supplied.
+    """
+    return resolve_website_with_reason(existing, company, email)[0]
+
+
+def resolve_website_with_reason(existing="", company="", email=""):
+    """Return (website_or_None, change_reason)."""
     current = normalize_website(existing)
     if current:
-        host = host_of(current)
-        if not cell(company) or domain_matches_company(host, company):
-            return current
-    return derive_website(company, email)
+        if current != cell(existing):
+            return current, "website: kept existing value and standardized"
+        return current, "website: kept existing value"
+    from_email = website_from_email(company, email)
+    if from_email:
+        return from_email, "website: derived from email domain (lookup table had no entry)"
+    from_company = website_from_company(company)
+    if from_company:
+        return from_company, "website: derived from company-name token"
+    if cell(existing):
+        return None, "website: existing value was invalid and was cleared"
+    return None, ""
 
 
 def is_free_provider_website(value) -> bool:

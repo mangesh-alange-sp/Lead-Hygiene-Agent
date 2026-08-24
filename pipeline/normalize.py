@@ -13,11 +13,10 @@ import pandas as pd
 
 from .casing import normalize_company_casing
 from .config import REGION_TO_COUNTRY, TITLE_ACRONYMS
-from .domains import company_match_key
-from .phone import infer_region, is_international_format, normalize_phone
-from .taxonomy import TAXONOMY
+from .phone import STATUS_NONE, infer_region, parse_phone
+from .taxonomy import TAXONOMY, resolve_company_alias
 from .textnorm import alias_key, cell as _cell
-from .website import resolve_website
+from .website import resolve_website_with_reason
 
 
 def _tax_key(value: str) -> str:
@@ -102,13 +101,7 @@ def normalize_company(company_raw: str) -> str:
         return ""
     if _lookup("invalid", raw_clean) == "INVALID":
         return ""
-    mapped = _lookup("company", raw_clean)
-    if mapped:
-        return mapped
-    # "McDonald's GmbH" / "bcbs association" should still hit the brand alias.
-    brand_key = company_match_key(raw_clean)
-    company_tax = TAXONOMY.get("company", {})
-    mapped = company_tax.get(brand_key) or company_tax.get(brand_key.replace(" ", ""))
+    mapped = resolve_company_alias(raw_clean)
     if mapped:
         return mapped
     return normalize_company_casing(raw_clean)
@@ -247,7 +240,10 @@ def _flag_row(df, idx, flag: str, *, hitl: bool = False):
 def normalize_dataframe(df: pd.DataFrame) -> tuple:
     """Normalizes all fields in place and returns (df, normalized_values_count)."""
     df = df.copy()
-    for col in ("data_quality_flags", "hitl_review"):
+    for col in (
+        "data_quality_flags", "hitl_review", "phone_status", "phone_reason",
+        "Phone_raw", "change_reasons", "completeness_flag", "email_status",
+    ):
         if col not in df.columns:
             df[col] = ""
     norm_count = 0
@@ -262,15 +258,28 @@ def normalize_dataframe(df: pd.DataFrame) -> tuple:
         country = _apply_map("country", row.get("Country"), True)
         company = normalize_company(row.get("Company"))
 
-        phone = normalize_phone(row.get("Phone"), email=email, company=company, country=country) or ""
+        parsed = parse_phone(row.get("Phone"), email=email, company=company, country=country)
         if not country:
-            region = infer_region(email=email, country="", phone=phone or row.get("Phone", ""))
+            region = infer_region(email=email, country="", phone=row.get("Phone", ""))
             if region:
                 country = REGION_TO_COUNTRY.get(region, "")
-                phone = (
-                    normalize_phone(row.get("Phone"), email=email, company=company, country=country)
-                    or phone
-                )
+                parsed = parse_phone(row.get("Phone"), email=email, company=company, country=country)
+        # Validation may have already cleared a junk phone and stashed the
+        # submitted value. Re-read it so the discard stays visible as a state
+        # instead of looking like a field that arrived empty. Re-parsing junk
+        # always yields an empty value, so nothing is resurrected.
+        stashed = _cell(row.get("Phone_raw", ""))
+        if parsed["status"] == STATUS_NONE and stashed:
+            parsed = parse_phone(stashed, email=email, company=company, country=country)
+
+        phone = parsed["value"] or ""
+        df.at[idx, "Phone_raw"] = parsed["raw"] or stashed
+        df.at[idx, "phone_status"] = parsed["status"] or ""
+        df.at[idx, "phone_reason"] = parsed.get("reason") or ""
+        # Reasons recorded upstream (email validation) must survive.
+        reasons = [part for part in [_cell(row.get("change_reasons", ""))] if part]
+        if parsed.get("reason"):
+            reasons.append(parsed["reason"])
 
         norm_count += _set_if_changed(df, idx, "Company", company, row.get("Company"))
         title = normalize_title(row.get("Title"))
@@ -278,18 +287,28 @@ def normalize_dataframe(df: pd.DataFrame) -> tuple:
         if is_low_quality_title(title):
             _flag_row(df, idx, "low_quality_title", hitl=True)
         norm_count += _set_if_changed(df, idx, "Phone", phone, row.get("Phone"))
-        if phone and not is_international_format(phone):
+        if parsed["status"] == "needs_review":
             _flag_row(df, idx, "unformatted_phone", hitl=True)
+            _flag_row(df, idx, "needs_country_code_review", hitl=True)
+        if parsed["status"] == "unparseable" and row.get("Phone"):
+            _flag_row(df, idx, "garbage_phone", hitl=True)
         if "MobilePhone" in df.columns:
-            mobile = normalize_phone(row.get("MobilePhone"), email=email, company=company, country=country) or ""
+            mobile_parsed = parse_phone(
+                row.get("MobilePhone"), email=email, company=company, country=country,
+            )
+            mobile = mobile_parsed["value"] or ""
             norm_count += _set_if_changed(df, idx, "MobilePhone", mobile, row.get("MobilePhone"))
-            if mobile and not is_international_format(mobile):
+            if mobile_parsed["status"] == "needs_review":
                 _flag_row(df, idx, "unformatted_phone", hitl=True)
-        norm_count += _set_if_changed(
-            df, idx, "Website",
-            resolve_website(row.get("Website"), company, email) or "",
-            row.get("Website"),
-        )
+            if mobile_parsed.get("reason"):
+                reasons.append(mobile_parsed["reason"])
+        existing_web = row.get("Website")
+        website, web_reason = resolve_website_with_reason(existing_web, company, email)
+        website = website or ""
+        if web_reason:
+            reasons.append(web_reason)
+        norm_count += _set_if_changed(df, idx, "Website", website, existing_web)
+        df.at[idx, "change_reasons"] = " | ".join(part for part in reasons if part)
         norm_count += _set_if_changed(
             df, idx, "Industry", _apply_map("industry", row.get("Industry"), True), row.get("Industry")
         )

@@ -39,10 +39,43 @@ def phone_has_text_marker(value) -> bool:
     return text.startswith("'") or text.startswith("\t")
 
 
+# E.164 (+447771695127) and the legacy dashed form are both real phone shapes.
+_PLUS_CC_RE = re.compile(r"^\+\d[\d-]*$")
+
+
 def phone_looks_like_excel_formula(value) -> bool:
-    """Excel/Sheets treat cells starting with + = - @ as formulas, not phone numbers."""
+    """Flag = @ and non-phone '+' / '-'. A leading +CC phone number is allowed."""
     text = "" if value is None else str(value)
-    return bool(text) and text[0] in "+=-@"
+    if not text:
+        return False
+    if text[0] in "=@":
+        return True
+    if text[0] == "-":
+        return True
+    if text[0] == "+":
+        return not bool(_PLUS_CC_RE.match(text))
+    return False
+
+
+def phone_lost_country_code(raw, cleaned) -> bool:
+    """
+    True when the input carried a country code and the output no longer does.
+
+    An unchanged value still carries whatever the source supplied (including a
+    00-prefixed form), and a value cleared as junk is a separate, deliberate
+    decision flagged as garbage_phone. Neither counts as a lost country code.
+    """
+    from .phone import input_has_calling_code, is_international_format
+    from .textnorm import digits_only
+
+    if not input_has_calling_code(raw):
+        return False
+    out = cell(cleaned)
+    if not out:
+        return False
+    if is_international_format(out):
+        return False
+    return digits_only(out) != digits_only(raw)
 
 
 def company_has_bad_dotted_case(value) -> bool:
@@ -158,6 +191,21 @@ def check_records(records, rows_in=None, input_ids=None, merge_log=None, dropped
     if formulas:
         violations.append(f"Phone values would be evaluated as Excel formulas: {_sample(formulas)}")
 
+    lost_cc = [
+        cell(r.get("Id", ""))
+        for r in records
+        if phone_lost_country_code(r.get("Phone_raw", r.get("Phone")), r.get("Phone"))
+    ]
+    lost_cc += [
+        cell(r.get("Id", ""))
+        for r in records
+        if phone_lost_country_code(r.get("MobilePhone_raw", ""), r.get("MobilePhone"))
+    ]
+    if lost_cc:
+        violations.append(
+            f"Phone lost a country code that was present on input: {_sample(lost_cc)}"
+        )
+
     bad_case = [cell(r.get("Id", "")) for r in records if company_has_bad_dotted_case(r.get("Company"))]
     if bad_case:
         violations.append(f"Company has lowercase after a dot outside the allowlist: {_sample(bad_case)}")
@@ -198,6 +246,23 @@ def check_records(records, rows_in=None, input_ids=None, merge_log=None, dropped
         )
 
     return violations
+
+
+def check_exported_schema(csv_text: str, expected_columns) -> list:
+    """Re-read the write-back CSV and assert the header is exactly the source set."""
+    import csv
+    import io
+
+    expected = [str(col) for col in expected_columns]
+    try:
+        header = next(csv.reader(io.StringIO(csv_text)))
+    except Exception as exc:
+        return [f"Exported CSV could not be re-read: {exc}"]
+    if header != expected:
+        return [f"Exported headers {header} != {expected}"]
+    if any(name.startswith('"') or name.endswith('"') for name in header):
+        return [f"Exported headers still carry quote characters: {header}"]
+    return []
 
 
 def assert_records(records, rows_in=None) -> None:

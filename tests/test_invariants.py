@@ -14,7 +14,7 @@ from pipeline.invariants import (
 
 
 def _row(**overrides):
-    row = {"Id": "00Q001", "Email": "pat@acme.com", "Phone": "(+1) 206-555-0100",
+    row = {"Id": "00Q001", "Email": "pat@acme.com", "Phone": "+12065550100",
            "Company": "Acme Corp", "Website": "https://acme.com"}
     row.update(overrides)
     return row
@@ -30,28 +30,35 @@ class CleanBatchTests(unittest.TestCase):
 
 class PhoneMarkerTests(unittest.TestCase):
     def test_detects_apostrophe_and_tab(self):
-        self.assertTrue(phone_has_text_marker("'+1-206-555-0100"))
-        self.assertTrue(phone_has_text_marker("\t+1-206-555-0100"))
-        self.assertFalse(phone_has_text_marker("+1-206-555-0100"))
+        self.assertTrue(phone_has_text_marker("'+12065550100"))
+        self.assertTrue(phone_has_text_marker("\t+12065550100"))
+        self.assertFalse(phone_has_text_marker("+12065550100"))
         self.assertFalse(phone_has_text_marker("(+1) 206-555-0100"))
 
     def test_detects_excel_formula_prefixes(self):
-        for value in ("+1-206-555-0100", "=1-206-555-0100", "-2088", "@2065550100"):
+        for value in ("=1-206-555-0100", "-2088", "@2065550100", "+not-a-phone"):
             self.assertTrue(phone_looks_like_excel_formula(value), value)
-        self.assertFalse(phone_looks_like_excel_formula("(+1) 206-555-0100"))
+        self.assertFalse(phone_looks_like_excel_formula("+12065550100"))
+        self.assertFalse(phone_looks_like_excel_formula("+1-206-555-0100"))
         self.assertFalse(phone_looks_like_excel_formula(""))
 
     def test_batch_fails_on_marked_phone(self):
-        violations = check_records([_row(Phone="'+1-206-555-0100")])
+        violations = check_records([_row(Phone="'+12065550100")])
         self.assertTrue(any("text marker" in v for v in violations))
 
-    def test_batch_fails_on_plus_prefixed_phone(self):
-        violations = check_records([_row(Phone="+1-206-555-0100")])
-        self.assertTrue(any("Excel formulas" in v for v in violations))
+    def test_e164_phone_is_allowed(self):
+        self.assertEqual(check_records([_row(Phone="+12065550100")]), [])
 
     def test_batch_fails_on_marked_mobile(self):
-        violations = check_records([_row(MobilePhone="'+1-206-555-0100")])
+        violations = check_records([_row(MobilePhone="'+12065550100")])
         self.assertTrue(any("text marker" in v for v in violations))
+
+    def test_unchanged_double_zero_form_is_not_a_lost_country_code(self):
+        from pipeline.invariants import phone_lost_country_code
+
+        self.assertFalse(phone_lost_country_code("003092345678", "003092345678"))
+        self.assertFalse(phone_lost_country_code("+447771695127", "+447771695127"))
+        self.assertTrue(phone_lost_country_code("+44-7771-695-127", "07771695127"))
 
 
 class CompanyCasingTests(unittest.TestCase):
@@ -99,7 +106,7 @@ class EmailAndRowCountTests(unittest.TestCase):
 
     def test_assert_records_raises(self):
         with self.assertRaises(InvariantViolation):
-            assert_records([_row(Phone="'+1-206-555-0100")])
+            assert_records([_row(Phone="'+12065550100")])
 
 
 class DropProvenanceTests(unittest.TestCase):

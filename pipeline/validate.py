@@ -12,8 +12,9 @@ from .domains import (
     is_plausible_domain,
 )
 from .config import DUMMY_FULL_NAMES, TEST_GIVEN_NAMES, TEST_SURNAMES
+from .emailcheck import INVALID_SYNTAX, UNDELIVERABLE, UNKNOWN, validate_lead_email
 from .phone import is_junk_phone
-from .textnorm import cell, email_domain, fold_text, strip_excel_artifacts
+from .textnorm import cell, digits_only, email_domain, fold_text, strip_excel_artifacts
 
 FORMULA_PREFIXES = ("=", "@")
 PHONE_COLS = {"phone", "mobilephone", "mobile"}
@@ -65,6 +66,40 @@ def _garbage_name(value: str) -> bool:
     return len(text) == 1 and not text.isalpha()
 
 
+WEBSITE_LOOKS_LIKE_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+PLACEHOLDER_CONTACT = frozenset({"test", "n/a", "na", "none", "null", "unknown", "-"})
+COMPLETENESS_FIELDS = ("Title", "Industry", "AnnualRevenue")
+AUDIT_EXTRA_COLS = (
+    "completeness_flag", "email_status", "change_reasons", "Phone_raw",
+)
+
+
+def _is_placeholder_contact(value) -> bool:
+    text = cell(value)
+    if not text:
+        return True
+    folded = fold_text(text)
+    if folded in PLACEHOLDER_CONTACT or text.lower() in PLACEHOLDER_CONTACT:
+        return True
+    return len(folded) == 1
+
+
+def is_junk_lead_values(company="", email="", phone="", *, has_phone: bool = True) -> bool:
+    """True when Company, Email, and Phone are all missing or placeholder."""
+    return (
+        _is_placeholder_contact(company)
+        and _is_placeholder_contact(email)
+        and (not has_phone or _is_placeholder_contact(phone))
+    )
+
+
+def is_website_email(value) -> bool:
+    text = cell(value)
+    if not text or "://" in text:
+        return False
+    return bool(WEBSITE_LOOKS_LIKE_EMAIL.match(text) or RFC_EMAIL.match(text))
+
+
 def is_test_name(first, last) -> bool:
     first_key, last_key = cell(first).lower(), cell(last).lower()
     if first_key in TEST_GIVEN_NAMES:
@@ -100,12 +135,12 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
     """
     issue_count = 0
     df = df.copy()
-    for col in AUDIT_COLS:
+    for col in AUDIT_COLS + AUDIT_EXTRA_COLS:
         if col not in df.columns:
             df[col] = ""
 
     for col in df.columns:
-        if col in AUDIT_COLS:
+        if col in AUDIT_COLS + AUDIT_EXTRA_COLS:
             continue
         phone_field = str(col).strip().lower() in PHONE_COLS
         df[col] = df[col].map(lambda v, phone_field=phone_field: _strip_formula(v, phone_field=phone_field))
@@ -116,6 +151,7 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
     for idx in df.index:
         flags = ""
         hitl = False
+        reasons = []
 
         first = cell(df.at[idx, "FirstName"]) if "FirstName" in df.columns else ""
         last = cell(df.at[idx, "LastName"]) if "LastName" in df.columns else ""
@@ -127,6 +163,22 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
         if is_test_record(first, last, company, email):
             flags = _add_flag(flags, "test_data")
             hitl = True
+            issue_count += 1
+
+        # Drop later in process_csv: Company + Email + Phone all missing/placeholder.
+        if is_junk_lead_values(company, email, phone, has_phone=has_phone):
+            flags = _add_flag(flags, "junk_lead")
+            hitl = True
+            issue_count += 1
+
+        # Reporting only: never drops or alters the record.
+        missing_profile = [
+            field for field in COMPLETENESS_FIELDS
+            if field in df.columns and not cell(df.at[idx, field])
+        ]
+        if missing_profile:
+            flags = _add_flag(flags, "incomplete_profile")
+            df.at[idx, "completeness_flag"] = "missing:" + "|".join(missing_profile)
             issue_count += 1
 
         if "FirstName" in df.columns and "LastName" in df.columns:
@@ -155,25 +207,42 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
             flags = _add_flag(flags, "missing_last_name")
             issue_count += 1
 
-        email_ok = bool(email) and bool(RFC_EMAIL.match(email))
-        if email and not email_ok:
-            flags = _add_flag(flags, "invalid_email")
-            issue_count += 1
-            df.at[idx, "Email"] = ""
-            email = ""
-            email_ok = False
-        elif email_ok and is_placeholder_domain(email_domain(email)):
-            flags = _add_flag(flags, "placeholder_email")
-            issue_count += 1
-            df.at[idx, "Email"] = ""
-            email = ""
-            email_ok = False
+        # Library-backed syntax + real MX deliverability. An undeliverable
+        # address nulls the field but never drops the lead.
+        email_ok = False
+        if email:
+            checked = validate_lead_email(email)
+            df.at[idx, "email_status"] = checked["status"]
+            if checked["reason"]:
+                reasons.append(checked["reason"])
+            df.at[idx, "Email"] = checked["value"]
+            email = checked["value"]
+            email_ok = bool(email)
+            if checked["status"] == INVALID_SYNTAX:
+                flags = _add_flag(flags, "invalid_email")
+                issue_count += 1
+            elif checked["status"] == UNDELIVERABLE:
+                flags = _add_flag(flags, "undeliverable_email")
+                hitl = True
+                issue_count += 1
+            elif checked["status"] == UNKNOWN:
+                flags = _add_flag(flags, "email_deliverability_unknown")
+                hitl = True
+                issue_count += 1
         if not email:
             flags = _add_flag(flags, "missing_email")
             hitl = True
             issue_count += 1
 
+        if has_phone and phone:
+            digit_len = len(digits_only(phone))
+            if 0 < digit_len < 7:
+                flags = _add_flag(flags, "needs_country_code_review")
+                hitl = True
+                issue_count += 1
         if has_phone and phone and is_junk_phone(phone):
+            # Keep the as-submitted value so a later pass can re-attempt it.
+            df.at[idx, "Phone_raw"] = phone
             df.at[idx, "Phone"] = ""
             phone = ""
             flags = _add_flag(flags, "garbage_phone")
@@ -189,8 +258,16 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
             issue_count += 1
 
         if has_website and website:
+            if is_website_email(website):
+                # Flag only. Normalization may clear the type-mismatch; do not
+                # drop the lead, and do not hide the error by silent-clearing first.
+                flags = _add_flag(flags, "website_is_email")
+                hitl = True
+                issue_count += 1
             host = _website_host(website)
-            if is_personal_domain(host):
+            if is_website_email(website):
+                pass
+            elif is_personal_domain(host):
                 df.at[idx, "Website"] = ""
                 flags = _add_flag(flags, "personal_website")
                 hitl = True
@@ -201,7 +278,6 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
                 hitl = True
                 issue_count += 1
             elif host and company and not domain_matches_company(host, company):
-                df.at[idx, "Website"] = ""
                 flags = _add_flag(flags, "website_company_mismatch")
                 hitl = True
                 issue_count += 1
@@ -220,5 +296,10 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
 
         df.at[idx, "data_quality_flags"] = flags
         df.at[idx, "hitl_review"] = "Yes" if hitl else ""
+        if reasons:
+            existing = cell(df.at[idx, "change_reasons"])
+            df.at[idx, "change_reasons"] = " | ".join(
+                part for part in [existing, *reasons] if part
+            )
 
     return df, issue_count

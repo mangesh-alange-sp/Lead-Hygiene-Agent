@@ -78,6 +78,15 @@ def case_company_token(token: str) -> str:
             tail = "" if display.endswith(".") and trailing.startswith(".") else trailing
             return leading + display + tail
 
+    if "-" in bare and not is_domain_like(bare):
+        bits = []
+        for part in bare.split("-"):
+            cased = case_company_token(part) if part else ""
+            if part and not part.endswith(".") and cased.endswith("."):
+                cased = cased[:-1]
+            bits.append(cased)
+        return leading + "-".join(bits) + trailing
+
     if is_domain_like(bare):
         return leading + case_domain_token(bare) + trailing
 

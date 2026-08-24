@@ -1,12 +1,39 @@
 """
 phone.py
-Phone normalization in isolation: normalize_phone(raw_phone, email, company, country) -> str | None.
+Phone validation/normalization in isolation, backed entirely by
+`phonenumbers` (the Python port of Google's libphonenumber).
 
-Rules this module guarantees (see tests/test_phone_rules.py):
-  * A number that starts with a known calling code keeps that (+CC) prefix.
-  * A NANP result never has an area code or exchange starting with 0 or 1.
-  * The result never starts with +, =, -, @, an apostrophe, or a tab (Excel formula/text markers).
-  * With no resolvable country signal the cleaned original is returned, not a guess.
+There is no regex reshaping here. A number is only rewritten when
+libphonenumber says `is_valid_number()`; otherwise the submitted value is
+preserved untouched and flagged for review. That ordering is what stops a
+country code from being silently dropped.
+
+Every record lands in exactly one of three states (see PHONE_STATUSES):
+
+  valid         -> E.164, e.g. +447771695127
+  needs_review  -> the cleaned as-submitted value, unchanged
+  unparseable   -> no usable digits at all (dummy/garbage), value cleared
+  "" (no state) -> the field was blank on arrival; there is nothing to review
+
+Resolution order, each step gated by `is_valid_number()`:
+
+  1. parse(raw, None)                  - raw already carries a country code
+  2. parse("+" + digits, None)         - raw was marked international (+ / 00)
+  3. parse("+" + digits, None)         - digits lead with a known calling code
+  4. parse(raw, <email TLD region>)    - region hint from the lead's own email
+  5. parse(raw, <country field region>)- region hint from the lead's own Country
+  6. parse(raw, NANP_FALLBACK_REGION)  - last resort for a value with no other
+                                         country evidence at all
+
+Step 6 is a validation attempt, not an assumption: a 10-digit NANP-shaped
+number in a US-heavy lead list is worth trying, but the result is only accepted
+when libphonenumber confirms it. It never runs on a value that already carries
+its own country code, so it cannot override real international data. Anything
+that still fails is left exactly as submitted and flagged needs_review.
+
+Caveat worth knowing: a foreign number that happens to be NANP-shaped (10
+digits, no leading zero) will be claimed by step 6. Populating the record's
+Country field is what prevents that, since step 5 wins first.
 """
 
 import re
@@ -31,6 +58,23 @@ DEFAULT_NATIONAL_LEN = (7, 13)
 # Below this length a leading calling code is indistinguishable from a national
 # number, so digit-prefix inference stays off.
 MIN_DIGITS_FOR_CC_PREFIX = 10
+
+STATUS_VALID = "valid"
+STATUS_NEEDS_REVIEW = "needs_review"
+STATUS_UNPARSEABLE = "unparseable"
+# A field that was blank on arrival. Not a state a phone can be "in", so it is
+# excluded from the review counts rather than reported as a problem.
+STATUS_NONE = ""
+PHONE_STATUSES = (STATUS_VALID, STATUS_NEEDS_REVIEW, STATUS_UNPARSEABLE)
+
+# Tried last, and only when the record offers no country evidence of its own.
+NANP_FALLBACK_REGION = "US"
+NO_EVIDENCE_REASON = (
+    "phone: no country-code evidence and not a valid NANP number; "
+    "original kept unchanged for review"
+)
+
+E164_RE = re.compile(r"^\+\d{6,15}$")
 
 
 def region_from_email(email) -> str:
@@ -58,11 +102,11 @@ def region_from_country(country) -> str:
 
 def region_from_digits(digits: str) -> str:
     """
-    Detect a region from a leading calling code.
+    Detect a region from a leading calling code already present in the digits.
 
-    Exactly ten digits that form a valid NANP number are ambiguous (a US number
-    and, say, a Singapore number can share that shape), so NANP wins and no
-    country is inferred from the prefix.
+    Exactly ten digits that form a valid NANP number are ambiguous (2065550100
+    also parses as +20 65550100), so the NANP shape wins and no country is
+    inferred from the prefix.
     """
     if not digits or len(digits) < MIN_DIGITS_FOR_CC_PREFIX:
         return ""
@@ -83,11 +127,24 @@ def region_from_digits(digits: str) -> str:
 
 def infer_region(email="", country="", phone="") -> str:
     """Email TLD, then Country, then a leading calling code. Never defaults to US."""
-    return (
-        region_from_email(email)
-        or region_from_country(country)
-        or region_from_digits(digits_only(_unwrap_excel_safe(strip_excel_artifacts(phone))))
-    )
+    return infer_region_with_source(email=email, country=country, phone=phone)[0]
+
+
+def infer_region_with_source(email="", country="", phone="", company=""):
+    """Same as infer_region, plus a human-readable evidence label."""
+    from_email = region_from_email(email)
+    if from_email:
+        return from_email, "email TLD"
+    from_country = region_from_country(country)
+    if from_country:
+        return from_country, "country field"
+    from_digits = region_from_digits(digits_only(_unwrap_bracketed_cc(strip_excel_artifacts(phone))))
+    if from_digits:
+        return from_digits, "leading calling-code digits"
+    from_company = region_from_country(company) if company else ""
+    if from_company:
+        return from_company, "company field"
+    return "", ""
 
 
 def is_valid_nanp(national: str) -> bool:
@@ -100,6 +157,7 @@ def is_valid_nanp(national: str) -> bool:
 
 
 def is_junk_phone(raw_phone) -> bool:
+    """Dummy/garbage values that carry no recoverable number at all."""
     raw = strip_excel_artifacts(raw_phone)
     digits = digits_only(raw)
     if not digits:
@@ -112,189 +170,162 @@ def is_junk_phone(raw_phone) -> bool:
         return True
     if digits in {"1234567890", "0123456789", "9876543210"}:
         return True
-    # NANP 555 is reserved for fiction; treat it as missing data, not a real line.
+    # NANP 555 area code is reserved for fiction; treat it as missing data.
     national = digits[1:] if len(digits) == 11 and digits.startswith("1") else digits
     if len(national) == 10 and national[:3] == "555":
         return True
     return False
 
 
-def format_cc_national(cc: str, national: str) -> str:
-    """Format as '(+CC) …'. Parentheses stop Excel treating '+' as a formula."""
-    national = digits_only(national)
-    if not national:
-        return ""
-    if cc == "1" and not is_valid_nanp(national):
-        return ""
-    try:
-        parsed = phonenumbers.parse("+" + cc + national, None)
-        if phonenumbers.is_possible_number(parsed):
-            intl = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
-            dashed = _dashes_from_international(intl)
-            safe = _excel_safe(dashed)
-            if safe.startswith(f"(+{cc})"):
-                return safe
-    except phonenumbers.NumberParseException:
-        pass
-    if len(national) >= 7:
-        groups = [national[:-7], national[-7:-4], national[-4:]]
-        return _excel_safe(f"+{cc}-" + "-".join(part for part in groups if part))
-    return _excel_safe(f"+{cc}-{national}")
-
-
-def _dashes_from_international(intl: str) -> str:
-    """'+33 1 67 45 82 14' / '+1 206-555-0100' -> '+33-1-67-45-82-14' / '+1-206-555-0100'."""
-    parts = [part for part in re.split(r"[\s.-]+", (intl or "").strip()) if part]
-    if parts and len(digits_only(parts[-1])) >= 7 and digits_only(parts[-1]) == parts[-1]:
-        last = parts[-1]
-        parts = parts[:-1] + [last[:-4], last[-4:]]
-    return "-".join(parts)
-
-
-def _excel_safe(plus_dashed: str) -> str:
-    """'+1-206-555-0100' -> '(+1) 206-555-0100' so spreadsheet apps keep it as text."""
-    match = re.match(r"^\+(\d{1,3})-(.*)$", plus_dashed or "")
-    if match:
-        return f"(+{match.group(1)}) {match.group(2)}"
-    return plus_dashed
-
-
-def is_international_format(value) -> bool:
-    """True when the value is already in the Excel-safe '(+CC) …' shape."""
-    return bool(re.match(r"^\(\+\d{1,3}\) ", cell(value)))
-
-
-def _unwrap_excel_safe(raw: str) -> str:
-    """'(+1) 206-555-0100' -> '+1 206-555-0100' so parsing still sees the calling code."""
+def _unwrap_bracketed_cc(raw: str) -> str:
+    """Accept legacy '(+CC) …' values and turn them back into '+CC …'."""
     return re.sub(r"^\(\+(\d{1,3})\)\s*", r"+\1 ", raw or "").strip()
 
 
-def _length_ok(cc: str, national: str) -> bool:
-    low, high = CC_NATIONAL_LEN.get(cc, DEFAULT_NATIONAL_LEN)
-    return low <= len(national) <= high
+def is_international_format(value) -> bool:
+    """True when the value carries a leading country code."""
+    return bool(re.match(r"^\+\d", cell(value)))
 
 
-def _possible(cc: str, national: str) -> bool:
-    """Cross-check against libphonenumber, but never let it veto a length-valid number."""
+def input_has_calling_code(raw_phone) -> bool:
+    """True for explicit +CC / 00CC. Dummy zeros like 000-000-000 are not a CC."""
+    text = _unwrap_bracketed_cc(strip_excel_artifacts(raw_phone))
+    if text.startswith("+"):
+        return True
+    return text.startswith("00") and not text.startswith("000")
+
+
+def format_e164(parsed) -> str:
+    return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+
+
+def _valid_or_none(raw: str, region=None):
+    """Parse and accept only when libphonenumber says the number is valid."""
     try:
-        parsed = phonenumbers.parse("+" + cc + national, None)
+        parsed = phonenumbers.parse(raw, region)
     except phonenumbers.NumberParseException:
-        return False
-    return phonenumbers.is_possible_number(parsed)
+        return None
+    return parsed if phonenumbers.is_valid_number(parsed) else None
 
 
-def _national_for_cc(digits: str, cc: str) -> str:
-    """Pick the national part for a known calling code, tolerating trunk prefixes."""
-    candidates = []
-    if digits.startswith(cc):
-        candidates.append(digits[len(cc):])
-    if digits.startswith("0"):
-        candidates.append(digits.lstrip("0"))
-    candidates.append(digits)
-    for national in candidates:
-        if not national:
-            continue
-        if cc == "1" and not is_valid_nanp(national):
-            continue
-        if _length_ok(cc, national) and _possible(cc, national):
-            return national
-    for national in candidates:
-        if national and _length_ok(cc, national) and not (cc == "1" and not is_valid_nanp(national)):
-            return national
-    return ""
+def format_cc_national(cc: str, national: str) -> str:
+    """E.164 for a known calling code + national number, or '' when invalid."""
+    national = digits_only(national)
+    if not cc or not national:
+        return ""
+    parsed = _valid_or_none("+" + cc + national)
+    return format_e164(parsed) if parsed else ""
 
 
 def format_for_region(raw_phone, region: str) -> str:
-    """Format digits against an explicit region. Returns '' when it does not fit."""
-    digits = digits_only(strip_excel_artifacts(raw_phone))
-    cc = REGION_CALLING.get((region or "").upper(), "")
-    if not digits or not cc:
+    """Format against an explicit region hint. '' when it does not validate."""
+    cleaned = collapse_whitespace(strip_excel_artifacts(raw_phone))
+    if not cleaned or not region:
         return ""
-    national = _national_for_cc(digits, cc)
-    if not national:
-        return ""
-    return format_cc_national(cc, national)
+    parsed = _valid_or_none(cleaned, (region or "").upper())
+    return format_e164(parsed) if parsed else ""
 
 
-def _from_explicit_international(raw: str, digits: str) -> str:
-    """Handle values the source already marked international ('+…' or '00…')."""
-    if raw.startswith("+"):
-        payload = digits
-    elif raw.startswith("00") and len(digits) > 4:
-        payload = digits[2:]
-    else:
-        return ""
-    for cc in CALLING_CODES:
-        if not payload.startswith(cc):
-            continue
-        national = payload[len(cc):]
-        if cc == "1" and not is_valid_nanp(national):
-            continue
-        if _length_ok(cc, national):
-            return format_cc_national(cc, national)
-    return ""
+def classify_phone(raw_phone) -> str:
+    """Classify the input before touching it: empty, garbage, noise, has_cc, missing_cc."""
+    raw = _unwrap_bracketed_cc(collapse_whitespace(strip_excel_artifacts(raw_phone)))
+    if not raw:
+        return "empty"
+    digits = digits_only(raw)
+    if re.search(r"\bext\.?\b|\bx\d+|/", raw, re.I) or raw.count("+") > 1:
+        return "noise"
+    if not digits or is_junk_phone(raw):
+        return "garbage"
+    if input_has_calling_code(raw):
+        return "has_cc"
+    return "missing_cc"
 
 
-def _demote_bad_international(raw: str, digits: str) -> tuple:
+def parse_phone(raw_phone, email="", company="", country=""):
     """
-    The source claimed an international form the digits cannot support, e.g. '+1'
-    in front of a number with a 0 area code. Drop the impossible country code
-    instead of emitting a fake +1 number.
+    Resolve one phone value.
+
+    Returns {value, status, reason, raw, class_} where status is one of
+    PHONE_STATUSES and `raw` is always the as-submitted value.
     """
-    body = raw[2:] if raw.startswith("00") else raw[1:]
-    payload = digits[2:] if raw.startswith("00") else digits
-    if payload.startswith("1") and not is_valid_nanp(payload[1:]):
-        stripped = payload[1:]
-        if len(stripped) >= MIN_PHONE_DIGITS:
-            return re.sub(r"^\s*1\s*[-.\s]?\s*", "", body).strip(" -."), stripped
-    return body.strip(" -."), payload
+    submitted = cell(raw_phone)
+    cleaned = _unwrap_bracketed_cc(collapse_whitespace(strip_excel_artifacts(raw_phone)))
+    kind = classify_phone(raw_phone)
+    base = {"raw": submitted, "class_": kind}
+
+    if kind == "empty":
+        # No phone was submitted, so there is no phone to have a state. Calling
+        # this "unparseable" would inflate the review count with blank fields.
+        return {**base, "value": "", "status": STATUS_NONE, "reason": ""}
+    if kind in {"garbage", "noise"}:
+        return {
+            **base, "value": "", "status": STATUS_UNPARSEABLE,
+            "reason": f"phone: {kind}, no recoverable number (left unparseable)",
+        }
+
+    digits = digits_only(cleaned)
+
+    # 1. The value already carries its own country code.
+    parsed = _valid_or_none(cleaned, None)
+    if parsed:
+        return {
+            **base, "value": format_e164(parsed), "status": STATUS_VALID,
+            "reason": "phone: validated as submitted, country code preserved",
+        }
+
+    # 2/3. Digits that already contain a calling code, either flagged
+    # international (+ / 00) or leading with a known code. Nothing is invented.
+    if kind == "has_cc" or region_from_digits(digits):
+        parsed = _valid_or_none("+" + digits, None)
+        if parsed:
+            return {
+                **base, "value": format_e164(parsed), "status": STATUS_VALID,
+                "reason": "phone: validated from the country code already in the value",
+            }
+
+    # 4/5. Region hint from the same record only: email TLD, then Country.
+    had_evidence = False
+    for region, evidence in (
+        (region_from_email(email), "email TLD"),
+        (region_from_country(country), "country field"),
+        (region_from_country(company) if company else "", "company field"),
+    ):
+        if not region:
+            continue
+        had_evidence = True
+        parsed = _valid_or_none(cleaned, region.upper())
+        if parsed:
+            return {
+                **base, "value": format_e164(parsed), "status": STATUS_VALID,
+                "reason": f"phone: validated with region hint {region.upper()} (from {evidence})",
+            }
+
+    # 6. No country evidence anywhere in the record: try NANP and keep the
+    # result only if libphonenumber validates it.
+    if kind == "missing_cc" and not had_evidence:
+        parsed = _valid_or_none(cleaned, NANP_FALLBACK_REGION)
+        if parsed:
+            return {
+                **base, "value": format_e164(parsed), "status": STATUS_VALID,
+                "reason": (
+                    f"phone: validated as a NANP number using the default "
+                    f"{NANP_FALLBACK_REGION} region (no other country evidence)"
+                ),
+            }
+
+    # Nothing validated. Keep the submitted value exactly as it came in.
+    return {
+        **base, "value": cleaned, "status": STATUS_NEEDS_REVIEW,
+        "reason": NO_EVIDENCE_REASON if not had_evidence else (
+            "phone: region evidence found but libphonenumber rejected the "
+            "number; original kept unchanged for review"
+        ),
+    }
 
 
 def normalize_phone(raw_phone, email="", company="", country=""):
-    """
-    Normalize one phone value to '(+CC) …' using only country signals that
-    are actually present. Returns None for junk/empty input.
-
-    The parentheses are required: a leading '+' makes Excel/Sheets evaluate the
-    value as arithmetic (so '+1-206-555-0100' becomes a negative number).
-
-    company is accepted so callers can pass the full record shape; it is only
-    consulted for a country hint and never used to invent a calling code.
-    """
-    raw = collapse_whitespace(strip_excel_artifacts(raw_phone))
-    raw = _unwrap_excel_safe(raw)
-    if not raw:
+    """E.164 when valid, the original value when unresolved, None for junk."""
+    result = parse_phone(raw_phone, email=email, company=company, country=country)
+    if result["status"] == STATUS_UNPARSEABLE:
         return None
-    if is_junk_phone(raw):
-        return None
-    digits = digits_only(raw)
-
-    explicit = _from_explicit_international(raw, digits)
-    if explicit:
-        return explicit
-    if raw.startswith("+") or raw.startswith("00"):
-        raw, digits = _demote_bad_international(raw, digits)
-
-    region = infer_region(email=email, country=country, phone=digits)
-    if not region:
-        region = region_from_country(company)
-    if region:
-        formatted = format_for_region(digits, region)
-        if formatted:
-            return formatted
-
-    # Structural NANP shape is itself a signal; a 10-digit number with a valid
-    # area code and exchange is treated as +1.
-    if is_valid_nanp(digits):
-        return format_cc_national("1", digits)
-    if len(digits) == 11 and digits.startswith("1") and is_valid_nanp(digits[1:]):
-        return format_cc_national("1", digits[1:])
-
-    # No resolvable signal: hand back the cleaned original rather than guessing.
-    # If the leftover still starts with '+CC-…', wrap it so Excel will not
-    # evaluate the cell as arithmetic.
-    if raw.startswith("+"):
-        wrapped = _excel_safe(raw)
-        if wrapped and wrapped[0] not in "+=-@":
-            return wrapped
-    return raw
+    return result["value"] or None

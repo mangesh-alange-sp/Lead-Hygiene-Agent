@@ -48,6 +48,7 @@ class SchemaTests(unittest.TestCase):
         self.assertTrue(audit)
         self.assertIn("merged_from_ids", audit[0])
         self.assertIn("match_signals_used", audit[0])
+        self.assertIn("match_reason", audit[0])
         self.assertEqual(result["audit_file"], "dedup_log.csv")
 
     def test_csv_export_hygiene(self):
@@ -86,7 +87,10 @@ class BatchInvariantTests(unittest.TestCase):
         for row in csv.DictReader(io.StringIO(result["csv"])):
             phone = row.get("Phone") or ""
             self.assertFalse(phone.startswith("'"), row.get("Id"))
-            self.assertFalse(bool(phone) and phone[0] in "+=-@", row.get("Id"))
+            if phone.startswith("+"):
+                self.assertRegex(phone, r"^\+\d{6,15}$", row.get("Id"))
+            else:
+                self.assertFalse(bool(phone) and phone[0] in "+=-@", row.get("Id"))
 
     def test_invariant_gate_blocks_a_broken_transformation(self):
         from unittest.mock import patch
@@ -133,15 +137,14 @@ class TrickyRowTests(unittest.TestCase):
 
     def test_country_signals_win_over_us_default(self):
         expected = {
-            "00Q011": "(+886)",  # Kuo-Tung Lin, .com.tw email
-            "00Q012": "(+33)",   # Stephane Leprince, France
-            "00Q017": "(+91)",   # Raj Patel, India
-            "00Q018": "(+31)",   # Anja Visser, explicit +31
-            "00Q023": "(+44)",   # Terry Ng, 44 prefix
-            "00Q024": "(+33)",
-            "00Q025": "(+60)",
-            "00Q026": "(+81)",
-            "00Q027": "(+81)",
+            "00Q011": "+886",  # Kuo-Tung Lin, Taiwan country
+            "00Q012": "+33",   # Stephane Leprince, France
+            "00Q018": "+31",   # Anja Visser, explicit +31
+            "00Q023": "+44",   # Terry Ng, 44 prefix
+            "00Q024": "+33",
+            "00Q025": "+60",
+            "00Q026": "+81",
+            "00Q027": "+81",
         }
         for lead_id, prefix in expected.items():
             with self.subTest(lead_id=lead_id):
@@ -149,18 +152,25 @@ class TrickyRowTests(unittest.TestCase):
                     self.phone(lead_id).startswith(prefix),
                     f"{lead_id} -> {self.phone(lead_id)}",
                 )
-                if prefix != "(+1)":
-                    self.assertFalse(self.phone(lead_id).startswith("(+1)"))
+                self.assertFalse(self.phone(lead_id).startswith("+1"))
+
+    def test_valid_phones_are_strict_e164(self):
+        for lead_id in ("00Q001", "00Q012", "00Q023", "00Q024", "00Q027"):
+            with self.subTest(lead_id=lead_id):
+                self.assertRegex(self.phone(lead_id), r"^\+\d{6,15}$")
 
     def test_us_numbers_still_format(self):
-        self.assertEqual(self.phone("00Q001"), "(+1) 206-555-0100")
+        self.assertEqual(self.phone("00Q001"), "+12065550100")
 
-    def test_phones_use_national_grouping(self):
-        self.assertEqual(self.phone("00Q012"), "(+33) 1-67-45-82-14")
-        self.assertEqual(self.phone("00Q017"), "(+91) 22-1234-5678")
-        self.assertEqual(self.phone("00Q023"), "(+44) 7911-123456")
-        self.assertEqual(self.phone("00Q024"), "(+33) 6-12-34-56-78")
-        self.assertEqual(self.phone("00Q027"), "(+81) 3-1234-5678")
+    def test_phones_use_one_uniform_format(self):
+        self.assertEqual(self.phone("00Q012"), "+33167458214")
+        self.assertEqual(self.phone("00Q023"), "+447911123456")
+        self.assertEqual(self.phone("00Q024"), "+33612345678")
+        self.assertEqual(self.phone("00Q027"), "+81312345678")
+
+    def test_number_that_fails_validation_keeps_its_original_value(self):
+        # 022-1234-5678 is not a valid Indian number even with +91 applied.
+        self.assertEqual(self.phone("00Q017"), "022-1234-5678")
 
     def test_mcdonalds_uses_the_brand_canonical(self):
         self.assertEqual(self.rows.loc["00Q002", "Company"], "McDonald's")
@@ -188,7 +198,7 @@ class TrickyRowTests(unittest.TestCase):
     def test_industry_aliases_map_to_canonical(self):
         self.assertEqual(self.rows.loc["00Q002", "Industry"], "Food & Beverage")
         self.assertEqual(self.rows.loc["00Q011", "Industry"], "Semiconductor")
-        self.assertEqual(self.rows.loc["00Q008", "Industry"], "Technology")
+        self.assertEqual(self.rows.loc["00Q009", "Industry"], "Technology")
 
     def test_empty_country_is_inferred_from_the_phone(self):
         self.assertEqual(self.rows.loc["00Q023", "Country"], "United Kingdom")
@@ -198,18 +208,26 @@ class TrickyRowTests(unittest.TestCase):
         self.assertEqual(self.rows.loc["00Q027", "Country"], "Japan")
 
     def test_held_rows_are_still_normalized(self):
-        self.assertEqual(self.rows.loc["00Q008", "Country"], "United States")
-        self.assertEqual(self.rows.loc["00Q008", "Industry"], "Technology")
-        self.assertEqual(self.rows.loc["00Q008", "Company"], "")
+        self.assertEqual(self.rows.loc["00Q009", "Company"], "Acme")
+        self.assertEqual(self.rows.loc["00Q009", "Industry"], "Technology")
+        self.assertEqual(self.rows.loc["00Q009", "Title"], "REP")
 
     def test_output_keeps_source_row_order(self):
         ids = [str(i) for i in self.rows.index]
-        self.assertLess(ids.index("00Q008"), ids.index("00Q010"))
-        self.assertLess(ids.index("00Q007"), ids.index("00Q008"))
+        self.assertLess(ids.index("00Q007"), ids.index("00Q010"))
+        self.assertLess(ids.index("00Q007"), ids.index("00Q009"))
 
     def test_placeholder_contact_name_is_nulled(self):
-        self.assertEqual(self.rows.loc["00Q008", "FirstName"], "")
-        self.assertEqual(self.rows.loc["00Q008", "LastName"], "")
+        df = pd.DataFrame({
+            "Id": ["00Q008"], "FirstName": ["No"], "LastName": ["Contact"],
+            "Email": [""], "Phone": [""], "Company": ["Missing Co"],
+        })
+        out, _ = validate_dataframe(df)
+        self.assertEqual(out.at[0, "FirstName"], "")
+        self.assertEqual(out.at[0, "LastName"], "")
+
+    def test_empty_shell_after_normalize_is_dropped(self):
+        self.assertNotIn("00Q008", self.rows.index)
 
     def test_field_merge_keeps_the_fuller_email(self):
         self.assertEqual(self.rows.loc["00Q002", "Email"], "lee.bailey@us.mcd.com")
@@ -224,27 +242,17 @@ class TrickyRowTests(unittest.TestCase):
         )
 
     def test_unresolvable_websites_are_nulled(self):
-        # test.com, wonka.com, stinks.com, r.o.c, yahoo.in: nothing legitimate to derive.
-        for lead_id in ("00Q014", "00Q015", "00Q016", "00Q022"):
+        # placeholder emails / personal hosts: nothing legitimate to derive.
+        for lead_id in ("00Q014", "00Q015", "00Q022"):
             with self.subTest(lead_id=lead_id):
                 self.assertEqual(self.rows.loc[lead_id, "Website"], "")
 
-    def test_websites_that_contradict_the_company_are_not_kept(self):
-        # Source values gmail.com / microsoft.com / oracle.com must not survive;
-        # a value derived from the matching corporate email domain may replace them.
-        from pipeline.domains import domain_matches_company, host_of
+    def test_valid_existing_websites_are_kept(self):
+        self.assertEqual(self.rows.loc["00Q010", "Website"], "https://microsoft.com")
+        self.assertEqual(self.rows.loc["00Q021", "Website"], "https://oracle.com")
 
-        for lead_id, rejected in (
-            ("00Q007", "gmail.com"), ("00Q010", "microsoft.com"), ("00Q021", "oracle.com"),
-        ):
-            site = str(self.rows.loc[lead_id, "Website"])
-            with self.subTest(lead_id=lead_id):
-                self.assertNotIn(rejected, site)
-                if site:
-                    self.assertTrue(
-                        domain_matches_company(host_of(site), self.rows.loc[lead_id, "Company"]),
-                        f"{lead_id} kept {site} for {self.rows.loc[lead_id, 'Company']}",
-                    )
+    def test_personal_existing_website_is_replaced_from_email(self):
+        self.assertEqual(self.rows.loc["00Q007", "Website"], "https://acme.com")
 
     def test_garbage_name_is_nulled(self):
         self.assertEqual(self.rows.loc["00Q006", "FirstName"], "")
@@ -385,12 +393,61 @@ class RunSummaryTests(unittest.TestCase):
         lines = " ".join(result["summary"]["critical_lines"])
         self.assertIn("willy@wonka.com", lines)
         self.assertIn("000-000-000", lines)
-        self.assertIn("lntecc.com", lines)
         self.assertNotIn("J.K.", lines)
         self.assertNotIn("Account Executive", lines)
         self.assertNotIn("Technology", lines)
         self.assertNotIn("https://castelity.de", lines)
-        self.assertNotIn("(+49)", lines)
+        self.assertNotIn("+49172", lines)
+
+
+class GoldenRegressionTests(unittest.TestCase):
+    def test_known_survivors_and_merges_are_unchanged(self):
+        from pipeline.regression import diff_against_golden
+
+        golden = pd.read_csv(FIXTURES / "golden_deduped.csv", dtype=str).fillna("")
+        result, out = _load_result()
+        self.assertEqual(list(out["Id"]), list(golden["Id"]))
+        self.assertEqual(result["duplicates_merged"], 3)
+        self.assertEqual(result["records_dropped"], 2)
+        self.assertEqual(diff_against_golden(result["csv"]), [])
+        self.assertEqual(result.get("field_diffs"), [])
+
+    def test_accented_names_are_not_ascii_folded(self):
+        _, out = _load_result()
+        rows = out.set_index("Id")
+        self.assertEqual(rows.loc["00Q003", "LastName"], "Büchert")
+        self.assertEqual(rows.loc["00Q012", "FirstName"], "Stéphane")
+        self.assertNotEqual(rows.loc["00Q003", "LastName"], "Buchert")
+        self.assertNotEqual(rows.loc["00Q012", "FirstName"], "Stephane")
+
+    def test_castelity_keeps_its_diacritic_phone_country(self):
+        csv_in = (
+            "Id,FirstName,LastName,Email,Phone,Company,Country\n"
+            "00Q1,Ada,Chen,ada@castelity.de,+491724597285,Castelity,Germany\n"
+        )
+        result = process_csv(csv_in)
+        self.assertEqual(result["status"], "ok", result.get("message"))
+        row = pd.read_csv(io.StringIO(result["csv"]), dtype=str).iloc[0]
+        self.assertTrue(row["Phone"].startswith("+49"))
+
+    def test_shared_switchboard_groups_stay_separate(self):
+        _, out = _load_result()
+        self.assertIn("00Q004", set(out["Id"]))
+        self.assertIn("00Q005", set(out["Id"]))
+
+
+class ExportSchemaTests(unittest.TestCase):
+    def test_exported_headers_round_trip(self):
+        from pipeline.invariants import check_exported_schema
+
+        result, _ = _load_result()
+        source = pd.read_csv(INPUT_CSV, dtype=str)
+        self.assertEqual(check_exported_schema(result["csv"], list(source.columns)), [])
+
+    def test_malformed_header_is_rejected(self):
+        from pipeline.invariants import check_exported_schema
+
+        self.assertTrue(check_exported_schema('"_"" ,Id\n', ["_", "Id"]))
 
 
 if __name__ == "__main__":

@@ -16,8 +16,11 @@ Guarantees (see tests/test_dedupe_rules.py):
 import pandas as pd
 from rapidfuzz import fuzz
 
+from rapidfuzz.distance import Levenshtein
+
 from .config import DUMMY_FULL_NAMES, FIRST_NAME_ALIASES, TEST_GIVEN_NAMES, TEST_SURNAMES
 from .domains import company_match_key, is_personal_domain
+from .taxonomy import company_alias_key
 from .textnorm import cell, digits_only, email_domain, email_local, email_local_fold, fold_text
 
 AUTO_MERGE_MIN = 70
@@ -26,7 +29,10 @@ HIGH_MIN = 90
 # similarity is never enough, including "both rows look like test data".
 IDENTITY_SIGNALS = frozenset({"exact_email", "name+company", "name+phone"})
 # Written by validate/dedupe for internal routing; never part of the output CSV.
-INTERNAL_FIELDS = ("data_quality_flags", "hitl_review")
+INTERNAL_FIELDS = (
+    "data_quality_flags", "hitl_review", "phone_status", "phone_reason",
+    "Phone_raw", "completeness_flag", "email_status",
+)
 
 
 def normalized_email(value) -> str:
@@ -60,6 +66,15 @@ def _placeholder_person(first_folded: str, last_folded: str) -> bool:
     return (first, last) in DUMMY_FULL_NAMES
 
 
+def _phones_near(p1: str, p2: str) -> bool:
+    """True when two numbers differ by 1–2 digits. Never an auto-merge by itself."""
+    if not p1 or not p2 or p1 == p2:
+        return False
+    if min(len(p1), len(p2)) < 7 or abs(len(p1) - len(p2)) > 2:
+        return False
+    return 1 <= Levenshtein.distance(p1, p2) <= 2
+
+
 def _names_identity(row1, row2) -> bool:
     """True only when both rows name the same real person (not junk/test tokens)."""
     fn1, fn2 = fold_text(row1.get("FirstName", "")), fold_text(row2.get("FirstName", ""))
@@ -78,6 +93,32 @@ def _add_flag(current, flag: str) -> str:
     if flag not in flags:
         flags.append(flag)
     return "|".join(flags)
+
+
+SIGNAL_REASONS = {
+    "exact_email": "exact email",
+    "name+company": "same name and company",
+    "name+phone": "same name and phone",
+    "name+phone_near": "same name and near-miss phone",
+    "phone_shared": "shared phone",
+    "switchboard_phone": "shared company switchboard",
+    "name+email_domain": "same name and email domain",
+    "name+email_local": "similar email local-part",
+    "weak_company": "name match with different company",
+}
+
+
+def match_reason(signals, score=0, decision="") -> str:
+    """Human-readable why a pair merged or was held. Does not change the decision."""
+    parts = [SIGNAL_REASONS.get(signal, signal) for signal in (signals or [])]
+    why = " + ".join(parts) if parts else "no identity signal"
+    label = _confidence_label(score)
+    prefix = f"{label}: " if label else ""
+    if decision == "hitl_review":
+        return f"{prefix}held for review ({why})"
+    if decision == "auto_merge":
+        return f"{prefix}merged on {why}"
+    return f"{prefix}{why}"
 
 
 def _confidence_label(score: int) -> str:
@@ -105,8 +146,8 @@ def score_pair(row1, row2) -> dict:
     fn1 = fold_text(row1.get("FirstName", ""))
     fn2 = fold_text(row2.get("FirstName", ""))
 
-    c1 = company_match_key(row1.get("Company", ""))
-    c2 = company_match_key(row2.get("Company", ""))
+    c1 = company_alias_key(row1.get("Company", ""))
+    c2 = company_alias_key(row2.get("Company", ""))
     same_company = bool(c1 and c2 and c1 == c2)
 
     d1, d2 = email_domain(e1), email_domain(e2)
@@ -120,12 +161,24 @@ def score_pair(row1, row2) -> dict:
         signals.append("name+company")
         score = max(score, 80 if _canonical_first(fn1) == _canonical_first(fn2) else 70)
 
+    phone_near = _phones_near(p1, p2)
+
     if names_ok and same_phone:
         signals.append("name+phone")
         score = max(score, 75)
     elif same_phone:
         signals.append("phone_shared")
         score = max(score, 25)
+    elif names_ok and phone_near:
+        signals.append("name+phone_near")
+        score = max(score, 20)
+
+    switchboard = bool(
+        same_phone and same_company and not names_ok
+        and e1 and e2 and e1 != e2
+    )
+    if switchboard:
+        signals.append("switchboard_phone")
 
     # Review-only: similar people without an identity field. Never auto-merge.
     if names_ok and same_domain and "exact_email" not in signals and not same_company:
@@ -140,15 +193,21 @@ def score_pair(row1, row2) -> dict:
 
     unique = list(dict.fromkeys(signals))
     both_test = _is_test_row(row1) and _is_test_row(row2)
-    # Two test rows may share a leftover real email; name/company/phone junk is not identity.
-    if both_test:
+    # Same company switchboard: shared phone is never identity.
+    if "switchboard_phone" in unique:
+        auto_merge = False
+    elif both_test:
         auto_merge = "exact_email" in unique
     else:
         auto_merge = bool(IDENTITY_SIGNALS.intersection(unique))
 
-    phone_only = unique == ["phone_shared"]
-    weak = any(flag in unique for flag in ("weak_company", "name+email_domain", "name+email_local"))
-    hitl = (not auto_merge) and (not both_test) and (phone_only or weak)
+    phone_only = unique == ["phone_shared"] or unique == ["phone_shared", "switchboard_phone"]
+    weak = any(flag in unique for flag in (
+        "weak_company", "name+email_domain", "name+email_local", "name+phone_near",
+    ))
+    hitl = (not auto_merge) and (not both_test) and (
+        phone_only or weak or "switchboard_phone" in unique
+    )
 
     return {
         "signals": unique,
@@ -221,7 +280,11 @@ def _better_email(kept: str, other: str) -> str:
     return kept
 
 
-def _better_company(kept: str, other: str) -> str:
+def prefer_formal_company(kept: str, other: str) -> str:
+    """
+    When two names are the same company, keep the more complete/formal form
+    (Castelity → Castelity GmbH, Sprinklr → Sprinklr Inc.).
+    """
     if not other:
         return kept
     if not kept:
@@ -230,6 +293,10 @@ def _better_company(kept: str, other: str) -> str:
     if k_kept == k_other and len(other) > len(kept):
         return other
     return kept
+
+
+def _better_company(kept: str, other: str) -> str:
+    return prefer_formal_company(kept, other)
 
 
 def _better_title(kept: str, other: str) -> str:
@@ -257,7 +324,7 @@ def merge_fields(winner, loser) -> dict:
     """Field-level survivorship: fill blanks, keep the more complete email/title/company."""
     merged = dict(winner)
     for key, value in loser.items():
-        if key in INTERNAL_FIELDS or key == "Id":
+        if key in INTERNAL_FIELDS or key in {"Id", "change_reasons"}:
             continue
         if not cell(merged.get(key)) and cell(value):
             merged[key] = value
@@ -271,7 +338,21 @@ def merge_fields(winner, loser) -> dict:
             cell(merged.get("LastName", "")), cell(loser.get("LastName", "")), first=False,
         )
     if "Company" in merged or "Company" in loser:
-        merged["Company"] = _better_company(cell(merged.get("Company", "")), cell(loser.get("Company", "")))
+        before = cell(merged.get("Company", ""))
+        merged["Company"] = _better_company(before, cell(loser.get("Company", "")))
+        extra = ""
+        if cell(merged.get("Company", "")) != before and cell(loser.get("Id", "")):
+            extra = (
+                f"merged with {cell(loser.get('Id', ''))}, "
+                "company name taken from merged record"
+            )
+        merged["change_reasons"] = " | ".join(
+            part for part in (
+                cell(merged.get("change_reasons", "")),
+                cell(loser.get("change_reasons", "")),
+                extra,
+            ) if part
+        )
     if "Title" in merged or "Title" in loser:
         merged["Title"] = _better_title(cell(merged.get("Title", "")), cell(loser.get("Title", "")))
     w_phone, l_phone = cell(merged.get("Phone", "")), cell(loser.get("Phone", ""))
@@ -344,6 +425,11 @@ class _MergeTracker:
                     f"{lid}:{'|'.join(self.pair_signals.get(lid, []))}"
                     for lid in self.merged_from.get(lead_id, [])
                     if lid
+                ),
+                "match_reason": match_reason(
+                    self.signals.get(lead_id, []),
+                    self.score.get(lead_id, 0),
+                    self.decision.get(lead_id, ""),
                 ),
             })
         return rows
