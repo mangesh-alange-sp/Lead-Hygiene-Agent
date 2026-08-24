@@ -13,7 +13,7 @@ from .domains import (
 )
 from .config import DUMMY_FULL_NAMES, TEST_GIVEN_NAMES, TEST_SURNAMES
 from .phone import is_junk_phone
-from .textnorm import cell, email_domain, fold_text, strip_excel_artifacts
+from .textnorm import cell, digits_only, email_domain, fold_text, strip_excel_artifacts
 
 FORMULA_PREFIXES = ("=", "@")
 PHONE_COLS = {"phone", "mobilephone", "mobile"}
@@ -63,6 +63,37 @@ def _garbage_name(value: str) -> bool:
     if text.isdigit():
         return True
     return len(text) == 1 and not text.isalpha()
+
+
+WEBSITE_LOOKS_LIKE_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+PLACEHOLDER_CONTACT = frozenset({"test", "n/a", "na", "none", "null", "unknown", "-"})
+COMPLETENESS_FIELDS = ("Title", "Industry", "AnnualRevenue")
+
+
+def _is_placeholder_contact(value) -> bool:
+    text = cell(value)
+    if not text:
+        return True
+    folded = fold_text(text)
+    if folded in PLACEHOLDER_CONTACT or text.lower() in PLACEHOLDER_CONTACT:
+        return True
+    return len(folded) == 1
+
+
+def is_junk_lead_values(company="", email="", phone="", *, has_phone: bool = True) -> bool:
+    """True when Company, Email, and Phone are all missing or placeholder."""
+    return (
+        _is_placeholder_contact(company)
+        and _is_placeholder_contact(email)
+        and (not has_phone or _is_placeholder_contact(phone))
+    )
+
+
+def is_website_email(value) -> bool:
+    text = cell(value)
+    if not text or "://" in text:
+        return False
+    return bool(WEBSITE_LOOKS_LIKE_EMAIL.match(text) or RFC_EMAIL.match(text))
 
 
 def is_test_name(first, last) -> bool:
@@ -129,6 +160,17 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
             hitl = True
             issue_count += 1
 
+        # Drop later in process_csv: Company + Email + Phone all missing/placeholder.
+        if is_junk_lead_values(company, email, phone, has_phone=has_phone):
+            flags = _add_flag(flags, "junk_lead")
+            hitl = True
+            issue_count += 1
+
+        if any(field in df.columns and not cell(df.at[idx, field]) for field in COMPLETENESS_FIELDS):
+            flags = _add_flag(flags, "incomplete_profile")
+            flags = _add_flag(flags, "completeness_flag")
+            issue_count += 1
+
         if "FirstName" in df.columns and "LastName" in df.columns:
             pair = (first.lower(), last.lower())
             if pair in DUMMY_FULL_NAMES:
@@ -173,6 +215,12 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
             hitl = True
             issue_count += 1
 
+        if has_phone and phone:
+            digit_len = len(digits_only(phone))
+            if 0 < digit_len < 7:
+                flags = _add_flag(flags, "needs_country_code_review")
+                hitl = True
+                issue_count += 1
         if has_phone and phone and is_junk_phone(phone):
             df.at[idx, "Phone"] = ""
             phone = ""
@@ -189,8 +237,16 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
             issue_count += 1
 
         if has_website and website:
+            if is_website_email(website):
+                # Flag only. Normalization may clear the type-mismatch; do not
+                # drop the lead, and do not hide the error by silent-clearing first.
+                flags = _add_flag(flags, "website_is_email")
+                hitl = True
+                issue_count += 1
             host = _website_host(website)
-            if is_personal_domain(host):
+            if is_website_email(website):
+                pass
+            elif is_personal_domain(host):
                 df.at[idx, "Website"] = ""
                 flags = _add_flag(flags, "personal_website")
                 hitl = True
@@ -201,7 +257,6 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
                 hitl = True
                 issue_count += 1
             elif host and company and not domain_matches_company(host, company):
-                df.at[idx, "Website"] = ""
                 flags = _add_flag(flags, "website_company_mismatch")
                 hitl = True
                 issue_count += 1

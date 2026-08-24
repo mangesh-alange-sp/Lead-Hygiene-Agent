@@ -93,6 +93,16 @@ class GeneralCasingRules(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertEqual(normalize_company_casing(raw), "L&T Construction")
 
+    def test_hyphenated_corp_suffix_keeps_its_case(self):
+        self.assertEqual(
+            normalize_company_casing("Associated Banc-Corp"),
+            "Associated Banc-Corp",
+        )
+        self.assertEqual(
+            normalize_company_casing("associated banc-corp"),
+            "Associated Banc-Corp",
+        )
+
     def test_small_words_lowercased_in_the_middle(self):
         self.assertEqual(
             normalize_company_casing("bank OF america"),
@@ -145,6 +155,13 @@ class BrandCanonicalRules(unittest.TestCase):
         for raw in ("AMGEN INC.", "Amgen Inc.", "Amgen Inc..", "amgen"):
             with self.subTest(raw=raw):
                 self.assertEqual(normalize_company(raw), "Amgen Inc.")
+
+    def test_alias_table_is_the_company_lookup(self):
+        from pipeline.taxonomy import resolve_company_alias
+
+        self.assertEqual(resolve_company_alias("MCDONALDS CORPORATION"), "McDonald's")
+        self.assertEqual(resolve_company_alias("p&g"), "Procter & Gamble")
+        self.assertEqual(resolve_company_alias("Some Unknown LLC"), "")
 
 
 if __name__ == "__main__":

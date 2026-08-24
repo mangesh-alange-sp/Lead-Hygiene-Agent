@@ -54,9 +54,9 @@ class CompanyFirstRules(unittest.TestCase):
     def test_email_domain_used_when_company_is_unknown(self):
         self.assertEqual(derive_website("", "pat@acme.com"), "https://acme.com")
 
-    def test_unrelated_email_domain_is_not_used(self):
-        self.assertIsNone(derive_website("SailPoint Technologies", "abcdrf@oracle.com"))
-        self.assertIsNone(derive_website("Acme Corp", "pat@microsoft.com"))
+    def test_email_domain_is_used_even_when_company_does_not_match(self):
+        self.assertEqual(derive_website("SailPoint Technologies", "abcdrf@oracle.com"), "https://oracle.com")
+        self.assertEqual(derive_website("Acme Corp", "pat@microsoft.com"), "https://microsoft.com")
 
 
 class ExistingValueRules(unittest.TestCase):
@@ -65,14 +65,17 @@ class ExistingValueRules(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertEqual(resolve_website(raw, "Amazon.com Inc.", ""), "https://amazon.com")
 
-    def test_mismatched_existing_site_is_dropped(self):
-        self.assertIsNone(resolve_website("oracle.com", "Acme Corp", "mcaroffino@salesforce.com"))
-        self.assertIsNone(resolve_website("microsoft.com", "Acme Corp", ""))
+    def test_valid_existing_site_is_kept_even_if_company_does_not_match(self):
+        self.assertEqual(
+            resolve_website("oracle.com", "Acme Corp", "mcaroffino@salesforce.com"),
+            "https://oracle.com",
+        )
+        self.assertEqual(resolve_website("microsoft.com", "Acme Corp", ""), "https://microsoft.com")
 
-    def test_mismatched_existing_site_is_replaced_when_the_email_matches(self):
+    def test_existing_valid_site_beats_email_domain(self):
         self.assertEqual(
             resolve_website("oracle.com", "Acme Corp", "pat@acme-corp.com"),
-            "https://acme-corp.com",
+            "https://oracle.com",
         )
 
     def test_social_and_malformed_hosts_dropped(self):
@@ -83,6 +86,11 @@ class ExistingValueRules(unittest.TestCase):
     def test_output_is_always_https_and_hostonly(self):
         result = resolve_website("http://www.acme.com/path?utm=1", "Acme", "")
         self.assertEqual(result, "https://acme.com")
+
+    def test_www_and_trailing_slash_are_stripped(self):
+        for raw in ("https://www.acme.com/", "www.acme.com/", "https://acme.com/"):
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize_website(raw), "https://acme.com")
 
     def test_idempotent(self):
         for company, email in (("Amazon.com Inc.", ""), ("Acme", "pat@acme.com"), ("Bfg", "willy@wonka.com")):

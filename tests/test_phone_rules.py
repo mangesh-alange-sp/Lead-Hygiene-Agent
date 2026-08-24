@@ -11,10 +11,12 @@ from pipeline.config import CALLING_TO_REGION, CC_NATIONAL_LEN, REGION_CALLING
 from pipeline.phone import (
     DEFAULT_NATIONAL_LEN,
     MIN_DIGITS_FOR_CC_PREFIX,
+    classify_phone,
     format_cc_national,
     infer_region,
     is_valid_nanp,
     normalize_phone,
+    parse_phone,
 )
 
 CALLING_CODES = sorted(set(REGION_CALLING.values()), key=len)
@@ -37,9 +39,14 @@ class CallingCodeRules(unittest.TestCase):
                 with self.subTest(cc=cc, raw=raw):
                     result = normalize_phone(raw)
                     self.assertIsNotNone(result)
+                    kept_cc = (
+                        result.startswith(f"+{cc}-")
+                        or result.startswith(f"+{cc}")
+                        or result.startswith(f"00{cc}")
+                    )
                     self.assertTrue(
-                        result.startswith(f"(+{cc})"),
-                        f"{raw} -> {result}, expected (+{cc}) prefix",
+                        kept_cc,
+                        f"{raw} -> {result}, expected calling code {cc} to survive",
                     )
 
     def test_bare_digits_with_leading_calling_code_keep_it(self):
@@ -53,17 +60,17 @@ class CallingCodeRules(unittest.TestCase):
             with self.subTest(cc=cc, digits=digits):
                 result = normalize_phone(digits)
                 self.assertTrue(
-                    result.startswith(f"(+{cc})"),
-                    f"{digits} -> {result}, expected (+{cc}) prefix",
+                    result.startswith(f"+{cc}-"),
+                    f"{digits} -> {result}, expected +{cc}- prefix",
                 )
 
     def test_email_tld_signal_beats_nanp_shape(self):
         cases = {
-            "kt.lin@example.com.tw": "(+886)",
-            "raj@larsentoubro.co.in": "(+91)",
-            "hans@buchert.de": "(+49)",
-            "sato@corp.co.jp": "(+81)",
-            "sam@corp.co.uk": "(+44)",
+            "kt.lin@example.com.tw": "+886-",
+            "raj@larsentoubro.co.in": "+91-",
+            "hans@buchert.de": "+49-",
+            "sato@corp.co.jp": "+81-",
+            "sam@corp.co.uk": "+44-",
         }
         for email, prefix in cases.items():
             with self.subTest(email=email):
@@ -71,7 +78,7 @@ class CallingCodeRules(unittest.TestCase):
                 self.assertTrue(result.startswith(prefix), f"{email} -> {result}")
 
     def test_country_field_signal(self):
-        for country, prefix in (("France", "(+33)"), ("Taiwan", "(+886)"), ("India", "(+91)"), ("Germany", "(+49)")):
+        for country, prefix in (("France", "+33-"), ("Taiwan", "+886-"), ("India", "+91-"), ("Germany", "+49-")):
             with self.subTest(country=country):
                 result = normalize_phone("0923456789", country=country)
                 self.assertTrue(result.startswith(prefix), f"{country} -> {result}")
@@ -90,9 +97,10 @@ class NanpRules(unittest.TestCase):
         ]
         for raw in bad:
             with self.subTest(raw=raw):
-                result = normalize_phone(raw) or ""
-                if result.startswith("(+1)"):
-                    rest = result.split(") ", 1)[-1]
+                parsed = parse_phone(raw)
+                result = parsed["value"] or ""
+                if parsed["status"] == "valid" and result.startswith("+1-"):
+                    rest = result[3:]
                     area, exchange = rest.split("-")[0], rest.split("-")[1]
                     self.assertNotIn(area[0], "01", f"{raw} -> {result}")
                     self.assertNotIn(exchange[0], "01", f"{raw} -> {result}")
@@ -101,13 +109,19 @@ class NanpRules(unittest.TestCase):
         for raw in ("092-266-8345", "016-745-8214"):
             with self.subTest(raw=raw):
                 result = normalize_phone(raw, email="a@b.us", country="United States") or ""
-                self.assertFalse(result.startswith("(+1) 0"))
-                self.assertFalse(result.startswith("(+1) 1"))
+                self.assertFalse(result.startswith("+1-0"))
+                self.assertFalse(result.startswith("+1-1"))
+                self.assertEqual(parse_phone(raw, country="United States")["status"], "needs_review")
 
-    def test_valid_nanp_is_formatted(self):
-        for raw in ("2065550100", "(206) 555-0100", "206.555.0100", "+1-206-555-0100", "12065550100", "(+1) 206-555-0100"):
+    def test_valid_nanp_formats_only_with_evidence(self):
+        for raw in ("+1-206-555-0100", "12065550100", "(+1) 206-555-0100"):
             with self.subTest(raw=raw):
-                self.assertEqual(normalize_phone(raw), "(+1) 206-555-0100")
+                self.assertEqual(normalize_phone(raw), "+1-206-555-0100")
+        for raw in ("2065550100", "(206) 555-0100", "206.555.0100"):
+            with self.subTest(raw=raw):
+                self.assertEqual(normalize_phone(raw), raw)
+                self.assertEqual(parse_phone(raw)["status"], "needs_review")
+                self.assertEqual(normalize_phone(raw, country="US"), "+1-206-555-0100")
 
     def test_is_valid_nanp_rule(self):
         for national in ("0234567890", "1234567890", "9230456789", "9231456789"):
@@ -127,7 +141,10 @@ class OutputShapeRules(unittest.TestCase):
                 result = normalize_phone(raw) or ""
                 self.assertFalse(result.startswith("'"))
                 self.assertFalse(result.startswith("\t"))
-                self.assertFalse(result[:1] in "+=-@")
+                if result.startswith("+"):
+                    self.assertRegex(result, r"^\+\d{1,3}-")
+                else:
+                    self.assertFalse(result[:1] in "+=-@")
 
     def test_marker_does_not_change_the_result(self):
         for raw in ("+1-206-555-0100", "819234567890", "0923456789"):
@@ -135,38 +152,62 @@ class OutputShapeRules(unittest.TestCase):
 
     def test_formatted_output_uses_one_shape(self):
         result = normalize_phone("+49 170 111 2223")
-        self.assertRegex(result, r"^\(\+\d{1,3}\) \d+(-\d+)*$")
+        self.assertRegex(result, r"^\+\d{1,3}-\d+(-\d+)*$")
 
     def test_format_cc_national_groups_last_seven_digits(self):
-        self.assertEqual(format_cc_national("1", "2065550100"), "(+1) 206-555-0100")
-        self.assertEqual(format_cc_national("33", "167458214"), "(+33) 1-67-45-82-14")
+        self.assertEqual(format_cc_national("1", "2065550100"), "+1-206-555-0100")
+        self.assertEqual(format_cc_national("33", "167458214"), "+33-1-67-45-82-14")
         self.assertEqual(format_cc_national("1", "0922668345"), "")
 
 
 class NoSignalRules(unittest.TestCase):
-    def test_unresolvable_number_returns_the_cleaned_original(self):
-        for raw in ("98324009", "12 34 56 78"):
-            with self.subTest(raw=raw):
-                result = normalize_phone(raw)
-                self.assertEqual(result, raw.strip())
+    def test_unresolvable_number_is_left_untouched(self):
+        self.assertEqual(normalize_phone("98324009"), "98324009")
+        self.assertEqual(normalize_phone("12 34 56 78"), "12 34 56 78")
+        self.assertEqual(normalize_phone("98006498"), "98006498")
+        self.assertEqual(parse_phone("98006498")["status"], "needs_review")
+
+    def test_singapore_tld_formats_an_8_digit_national(self):
+        self.assertEqual(
+            normalize_phone("98006498", email="user@sprinklr.com.sg"),
+            "+65-9800-6498",
+        )
+        parsed = parse_phone("98006498", email="user@sprinklr.com.sg")
+        self.assertEqual(parsed["status"], "valid")
+        self.assertIn("email TLD", parsed["reason"])
+
+    def test_sprinklr_bare_digits_without_evidence_need_review(self):
+        parsed = parse_phone("98006498", email="user@sprinklr.com", company="Sprinklr")
+        self.assertEqual(parsed["value"], "98006498")
+        self.assertEqual(parsed["status"], "needs_review")
+        self.assertEqual(parsed["raw"], "98006498")
 
     def test_cleaned_original_is_stripped_of_markers_only(self):
         self.assertEqual(normalize_phone("'98324009"), "98324009")
         self.assertEqual(normalize_phone("  98324009  "), "98324009")
 
     def test_no_signal_never_invents_a_calling_code(self):
-        for raw in ("98324009", "12 34 56 78"):
+        for raw in ("98324009", "12 34 56 78", "98006498"):
             self.assertNotIn("+", normalize_phone(raw), raw)
 
     def test_trunk_zero_formats_when_country_is_known(self):
-        self.assertEqual(normalize_phone("0167458214", country="France"), "(+33) 1-67-45-82-14")
+        self.assertEqual(normalize_phone("0167458214", country="France"), "+33-1-67-45-82-14")
 
     def test_trunk_zero_without_country_is_not_guessed(self):
         for raw in ("0167458214", "099300286056"):
             with self.subTest(raw=raw):
                 result = normalize_phone(raw)
                 self.assertEqual(result, raw)
-                self.assertFalse(result.startswith("(+"))
+                self.assertFalse(result.startswith("+"))
+
+
+class ClassifyRules(unittest.TestCase):
+    def test_classes(self):
+        self.assertEqual(classify_phone(""), "empty")
+        self.assertEqual(classify_phone("12"), "garbage")
+        self.assertEqual(classify_phone("+44-7771-695-127"), "has_cc")
+        self.assertEqual(classify_phone("98006498"), "missing_cc")
+        self.assertEqual(classify_phone("2065550100 ext. 12"), "noise")
 
 
 class JunkRules(unittest.TestCase):
@@ -176,6 +217,8 @@ class JunkRules(unittest.TestCase):
                     "5551234567", "555-123-4567", "1-555-123-4567"):
             with self.subTest(raw=raw):
                 self.assertIsNone(normalize_phone(raw))
+                if raw not in (None, "", "   "):
+                    self.assertEqual(parse_phone(raw)["status"], "unparseable")
 
     def test_absurdly_long_numbers_rejected(self):
         self.assertIsNone(normalize_phone("1234567890123456789"))

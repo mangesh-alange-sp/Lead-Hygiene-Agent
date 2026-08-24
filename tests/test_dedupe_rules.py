@@ -228,6 +228,56 @@ class SignalRules(unittest.TestCase):
             any("name+company" in entry.get("absorbed_match_signals", "") for entry in merge_log)
         )
 
+    def test_company_alias_table_is_a_dedupe_key(self):
+        result = score_pair(
+            _record("00Q1", "David", "Manaster", "dmanaster@pg.com", "", "P&G"),
+            _record("00Q2", "Dave", "Manaster", "david.manaster@pg.com", "", "Procter & Gamble"),
+        )
+        self.assertIn("name+company", result["signals"])
+        self.assertTrue(result["auto_merge"])
+
+    def test_shared_company_switchboard_does_not_merge(self):
+        result = score_pair(
+            _record("00Q1", "Jane", "Doe", "jane@amazon.com", "2065550100", "Amazon"),
+            _record("00Q2", "Mark", "Lopez", "mark@amazon.com", "2065550100", "Amazon"),
+        )
+        self.assertIn("switchboard_phone", result["signals"])
+        self.assertFalse(result["auto_merge"])
+        self.assertTrue(result["hitl"])
+
+    def test_near_miss_phone_is_a_review_signal_not_identity(self):
+        result = score_pair(
+            _record("00Q1", "Jane", "Doe", "jane@acme.com", "2065550100", "Acme Corp"),
+            _record("00Q2", "Jane", "Doe", "jane.d@other.com", "2065550101", "Other Co"),
+        )
+        self.assertIn("name+phone_near", result["signals"])
+        self.assertFalse(result["auto_merge"])
+        self.assertTrue(result["hitl"])
+
+    def test_merge_log_records_a_reason(self):
+        records = [
+            _record("00Q001", "Jane", "Doe", "jane@amazon.com", "2065550100", "Amazon.com Inc."),
+            _record("DUPE001", "Jane", "Doe", "jane@amazon.com", "2065550100", "Amazon Inc"),
+        ]
+        _, merge_log = dedupe_leads(records)
+        entry = next(e for e in merge_log if e["surviving_lead_id"] == "00Q001")
+        self.assertIn("exact email", entry["match_reason"])
+        self.assertTrue(entry["match_reason"].startswith("High"))
+
+    def test_formal_company_suffix_is_taken_from_the_merged_record(self):
+        from pipeline.dedupe import prefer_formal_company
+
+        self.assertEqual(prefer_formal_company("Castelity", "Castelity GmbH"), "Castelity GmbH")
+        self.assertEqual(prefer_formal_company("Sprinklr", "Sprinklr Inc."), "Sprinklr Inc.")
+        self.assertEqual(prefer_formal_company("Castelity GmbH", "Castelity"), "Castelity GmbH")
+        records = [
+            _record("00Q1", "Ada", "Chen", "ada@castelity.de", "", "Castelity"),
+            _record("00Q2", "Ada", "Chen", "ada.chen@castelity.de", "", "Castelity GmbH"),
+        ]
+        survivors, _ = dedupe_leads(records)
+        self.assertEqual(len(survivors), 1)
+        self.assertEqual(survivors[0]["Company"], "Castelity GmbH")
+
 
 if __name__ == "__main__":
     unittest.main()

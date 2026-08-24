@@ -36,3 +36,26 @@ def load_taxonomy(filepath: Path = TAXONOMY_FILE) -> dict:
 
 
 TAXONOMY = load_taxonomy()
+
+
+def resolve_company_alias(raw) -> str:
+    """Canonical company name from the alias table, or '' if the name is unknown."""
+    from .domains import company_match_key
+    from .textnorm import alias_key, cell
+
+    text = cell(raw)
+    if not text:
+        return ""
+    company_tax = TAXONOMY.get("company", {})
+    mapped = company_tax.get(alias_key(text))
+    if mapped:
+        return mapped
+    brand = company_match_key(text)
+    return company_tax.get(brand) or company_tax.get(brand.replace(" ", "")) or ""
+
+
+def company_alias_key(raw) -> str:
+    """Dedupe key after alias resolution, so P&G and Procter & Gamble share one key."""
+    from .domains import company_match_key
+
+    return company_match_key(resolve_company_alias(raw) or raw)
