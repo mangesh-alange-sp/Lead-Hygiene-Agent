@@ -23,9 +23,14 @@ def main():
     result = process_csv(input_path.read_text(encoding="utf-8"))
     if result["status"] != "ok":
         print(result["message"])
+        for violation in result.get("invariant_violations", []):
+            print(f"  invariant: {violation}")
         sys.exit(1)
 
     dest.write_text(result["csv"], encoding="utf-8")
+    log_path = dest.with_name("dedup_log.csv")
+    if result.get("audit_csv"):
+        log_path.write_text(result["audit_csv"], encoding="utf-8")
     print("deduped.csv is ready." if dest.name == "deduped.csv" else f"{dest} is ready.")
     print(f"Leads in: {result['leads_in']}")
     print(f"Validation issues: {result['validation_issues']}")
@@ -34,6 +39,10 @@ def main():
     print(f"Leads to write back: {result['leads_out']}")
     if result["blank_email_kept"]:
         print(f"Leads with no email (kept, not merged): {result['blank_email_kept']}")
+    if result.get("hitl_records"):
+        print(f"HITL review: {result['hitl_records']}")
+    if result.get("audit_csv"):
+        print("dedup_log.csv is ready.")
 
 
 if __name__ == "__main__":

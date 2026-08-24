@@ -44,6 +44,12 @@ Leads to write back: <leads_out>
 If blank_email_kept is greater than 0, add:
 Leads with no email (kept, not merged): <blank_email_kept>
 
+If hitl_records is greater than 0, add:
+HITL review: <hitl_records>
+
+If audit_file is present, add:
+dedup_log.csv is ready.
+
 Do not add names, emails, tables, CSV text, or explanations.
 """
 

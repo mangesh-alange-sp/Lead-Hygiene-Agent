@@ -1,58 +1,236 @@
-"""
-validate.py
-File and row validation checks for Lead Hygiene pipeline.
-"""
+"""Validate rows, flag quality issues, and hold hard-required failures for HITL."""
 
 import re
+
 import pandas as pd
 
-EMAIL_REGEX = re.compile(r"^[\w\.-]+@[\w\.-]+\.\w+$")
-BLANK_TOKENS = {"", "n/a", "unknown", "nan", "none", "null", "-", "--"}
+from .domains import (
+    domain_matches_company,
+    host_of,
+    is_personal_domain,
+    is_placeholder_domain,
+    is_plausible_domain,
+)
+from .phone import is_junk_phone
+from .textnorm import cell, email_domain, fold_text, strip_excel_artifacts
+
+FORMULA_PREFIXES = ("=", "@")
+PHONE_COLS = {"phone", "mobilephone", "mobile"}
+RFC_EMAIL = re.compile(
+    r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
+)
+DUMMY_FULL_NAMES = frozenset({
+    ("no", "contact"),
+    ("test", "user"),
+    ("test", "test"),
+    ("foo", "bar"),
+    ("asdf", "asdf"),
+    ("bad", "email"),
+})
+TEST_GIVEN_NAMES = frozenset({
+    "test", "dummy", "fake", "sample", "asdf", "qwerty", "abc", "abcd",
+    "foobar", "foo",
+})
+TEST_SURNAMES = frozenset({"test", "tester", "dummy", "fake", "asdf"})
+TEST_COMPANY_KEYS = frozenset({
+    "test", "test arp", "dummy", "dummy company", "fake company", "sample company",
+})
+TEST_EMAIL_HOSTS = frozenset({"test.com", "test.org", "test.net", "testing.com"})
+AUDIT_COLS = ("data_quality_flags", "hitl_review")
 
 
-def _strip_formula(value) -> str:
-    """Strip spreadsheet formulas, but keep +49... phone numbers and emails."""
+def _strip_formula(value, *, phone_field: bool = False) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
-    text = str(value)
-    if text.startswith("="):
-        return text[1:]
-    if text.startswith("+") and re.match(r"^\+[A-Za-z]", text):
-        return text[1:]
-    if text.startswith("@") and re.match(r"^@[A-Za-z]", text):
-        return text[1:]
+    if phone_field:
+        return strip_excel_artifacts(value)
+    text = str(value).strip()
+    if text.startswith("'") and len(text) > 1 and text[1] in "+-=":
+        text = text[1:]
+    while text.startswith(FORMULA_PREFIXES):
+        text = text[1:]
     return text
 
 
-def _cell(value) -> str:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+def _add_flag(current: str, flag: str) -> str:
+    flags = [part for part in (current or "").split("|") if part]
+    if flag not in flags:
+        flags.append(flag)
+    return "|".join(flags)
+
+
+def _website_host(value: str) -> str:
+    text = cell(value)
+    if not text or ("@" in text and "://" not in text):
         return ""
-    return str(value).strip()
+    return host_of(text)
+
+
+def _garbage_name(value: str) -> bool:
+    text = cell(value)
+    if not text:
+        return False
+    if text.isdigit():
+        return True
+    return len(text) == 1 and not text.isalpha()
+
+
+def is_test_name(first, last) -> bool:
+    first_key, last_key = cell(first).lower(), cell(last).lower()
+    if first_key in TEST_GIVEN_NAMES:
+        return True
+    if last_key in TEST_SURNAMES:
+        return True
+    return False
+
+
+def is_test_company(company) -> bool:
+    key = fold_text(company)
+    if not key:
+        return False
+    if key in TEST_COMPANY_KEYS or key.startswith("test "):
+        return True
+    return False
+
+
+def is_test_record(first="", last="", company="", email="") -> bool:
+    if is_test_name(first, last) or is_test_company(company):
+        return True
+    host = email_domain(email)
+    if host in TEST_EMAIL_HOSTS or host.endswith(".test"):
+        return True
+    return False
 
 
 def validate_dataframe(df: pd.DataFrame) -> tuple:
     """
-    Validates CSV contents in place.
-    - Strips formula injection characters (=, +, @) from cell starts.
-    - Counts validation issues (missing required names, malformed emails).
-    Returns (cleaned_df, issue_count).
+    Returns (df, issue_count).
+    Adds data_quality_flags and hitl_review.
+    Hard-required: Email OR Phone. Soft-required: FirstName, LastName.
     """
     issue_count = 0
     df = df.copy()
+    for col in AUDIT_COLS:
+        if col not in df.columns:
+            df[col] = ""
 
     for col in df.columns:
-        df[col] = df[col].map(_strip_formula)
+        if col in AUDIT_COLS:
+            continue
+        phone_field = str(col).strip().lower() in PHONE_COLS
+        df[col] = df[col].map(lambda v, phone_field=phone_field: _strip_formula(v, phone_field=phone_field))
 
-    for _, row in df.iterrows():
-        email = _cell(row.get("Email", ""))
-        last_name = _cell(row.get("LastName", ""))
-        company = _cell(row.get("Company", ""))
+    has_phone = "Phone" in df.columns
+    has_website = "Website" in df.columns
 
-        if not email or not EMAIL_REGEX.match(email):
+    for idx in df.index:
+        flags = ""
+        hitl = False
+
+        first = cell(df.at[idx, "FirstName"]) if "FirstName" in df.columns else ""
+        last = cell(df.at[idx, "LastName"]) if "LastName" in df.columns else ""
+        email = cell(df.at[idx, "Email"]) if "Email" in df.columns else ""
+        phone = cell(df.at[idx, "Phone"]) if has_phone else ""
+        company = cell(df.at[idx, "Company"]) if "Company" in df.columns else ""
+        website = cell(df.at[idx, "Website"]) if has_website else ""
+
+        if is_test_record(first, last, company, email):
+            flags = _add_flag(flags, "test_data")
+            hitl = True
             issue_count += 1
-        if last_name.lower() in BLANK_TOKENS:
+
+        if "FirstName" in df.columns and "LastName" in df.columns:
+            pair = (first.lower(), last.lower())
+            if pair in DUMMY_FULL_NAMES:
+                df.at[idx, "FirstName"] = ""
+                df.at[idx, "LastName"] = ""
+                first = last = ""
+                flags = _add_flag(flags, "placeholder_name")
+                issue_count += 1
+        if "FirstName" in df.columns and _garbage_name(first):
+            df.at[idx, "FirstName"] = ""
+            first = ""
+            flags = _add_flag(flags, "garbage_first_name")
             issue_count += 1
-        if company.lower() in BLANK_TOKENS:
+        if "LastName" in df.columns and _garbage_name(last):
+            df.at[idx, "LastName"] = ""
+            last = ""
+            flags = _add_flag(flags, "garbage_last_name")
             issue_count += 1
+
+        if not first:
+            flags = _add_flag(flags, "missing_first_name")
+            issue_count += 1
+        if not last:
+            flags = _add_flag(flags, "missing_last_name")
+            issue_count += 1
+
+        email_ok = bool(email) and bool(RFC_EMAIL.match(email))
+        if email and not email_ok:
+            flags = _add_flag(flags, "invalid_email")
+            issue_count += 1
+            df.at[idx, "Email"] = ""
+            email = ""
+            email_ok = False
+        elif email_ok and is_placeholder_domain(email_domain(email)):
+            flags = _add_flag(flags, "placeholder_email")
+            issue_count += 1
+            df.at[idx, "Email"] = ""
+            email = ""
+            email_ok = False
+        if not email:
+            flags = _add_flag(flags, "missing_email")
+            hitl = True
+            issue_count += 1
+
+        if has_phone and phone and is_junk_phone(phone):
+            df.at[idx, "Phone"] = ""
+            phone = ""
+            flags = _add_flag(flags, "garbage_phone")
+            issue_count += 1
+        if has_phone and not phone:
+            flags = _add_flag(flags, "missing_phone")
+            hitl = True
+            issue_count += 1
+
+        if not email_ok and not phone:
+            flags = _add_flag(flags, "missing_hard_required")
+            hitl = True
+            issue_count += 1
+
+        if has_website and website:
+            host = _website_host(website)
+            if is_personal_domain(host):
+                df.at[idx, "Website"] = ""
+                flags = _add_flag(flags, "personal_website")
+                hitl = True
+                issue_count += 1
+            elif is_placeholder_domain(host) or not is_plausible_domain(host):
+                df.at[idx, "Website"] = ""
+                flags = _add_flag(flags, "invalid_website")
+                hitl = True
+                issue_count += 1
+            elif host and company and not domain_matches_company(host, company):
+                df.at[idx, "Website"] = ""
+                flags = _add_flag(flags, "website_company_mismatch")
+                hitl = True
+                issue_count += 1
+
+        if email_ok and company:
+            host = email_domain(email)
+            if (
+                host
+                and not is_personal_domain(host)
+                and not is_placeholder_domain(host)
+                and not domain_matches_company(host, company)
+            ):
+                flags = _add_flag(flags, "company_email_mismatch")
+                hitl = True
+                issue_count += 1
+
+        df.at[idx, "data_quality_flags"] = flags
+        df.at[idx, "hitl_review"] = "Yes" if hitl else ""
 
     return df, issue_count

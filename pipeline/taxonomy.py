@@ -3,11 +3,9 @@
 from pathlib import Path
 import re
 
+from .textnorm import alias_key
+
 TAXONOMY_FILE = Path(__file__).resolve().parent.parent / "data" / "reference_taxonomy.md"
-
-
-def _alias_key(value: str) -> str:
-    return re.sub(r"[,.]", "", (value or "").strip().lower())
 
 
 def load_taxonomy(filepath: Path = TAXONOMY_FILE) -> dict:
@@ -28,7 +26,7 @@ def load_taxonomy(filepath: Path = TAXONOMY_FILE) -> dict:
             if line.startswith("|") and not line.startswith("|---"):
                 parts = [p.strip() for p in line.split("|")[1:-1]]
                 if len(parts) >= 2:
-                    alias, canonical = _alias_key(parts[0]), parts[1]
+                    alias, canonical = alias_key(parts[0]), parts[1]
                     if alias and canonical and alias != "alias":
                         table_map[alias] = canonical
 
