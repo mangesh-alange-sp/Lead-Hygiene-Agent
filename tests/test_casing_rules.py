@@ -84,6 +84,10 @@ class DomainTokenRules(unittest.TestCase):
 
 
 class GeneralCasingRules(unittest.TestCase):
+    def test_short_all_caps_tokens_stay_acronyms(self):
+        self.assertEqual(normalize_company_casing("BFG"), "BFG")
+        self.assertEqual(normalize_company_casing("bfg"), "BFG")
+
     def test_ampersand_initialisms_are_joined(self):
         for raw in ("l&t construction", "L and T Construction", "l & t construction"):
             with self.subTest(raw=raw):

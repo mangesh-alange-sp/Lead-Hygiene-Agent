@@ -11,7 +11,7 @@ import re
 
 from .casing import is_domain_like
 from .config import DOTTED_LOWERCASE_WHITELIST
-from .dedupe import normalized_email
+from .dedupe import IDENTITY_SIGNALS, normalized_email
 from .textnorm import cell
 from .website import is_free_provider_website
 
@@ -65,7 +65,85 @@ def company_has_bad_dotted_case(value) -> bool:
     return False
 
 
-def check_records(records, rows_in=None) -> list:
+def _ids(values) -> list:
+    return [cell(value) for value in (values or []) if cell(value)]
+
+
+def _parse_absorbed_signals(entry: dict) -> dict:
+    """Map each absorbed Id to the signals that justified that hop."""
+    parsed = {}
+    raw = cell(entry.get("absorbed_match_signals", ""))
+    if raw:
+        for part in raw.split(";"):
+            if ":" not in part:
+                continue
+            lead_id, sigs = part.split(":", 1)
+            lead_id = cell(lead_id)
+            if lead_id:
+                parsed[lead_id] = [s for s in sigs.split("|") if s]
+    fallback = [s for s in cell(entry.get("match_signals_used", "")).split("|") if s]
+    for lead_id in cell(entry.get("merged_from_ids", "")).split(";"):
+        lead_id = cell(lead_id)
+        if lead_id and lead_id not in parsed:
+            parsed[lead_id] = fallback
+    return parsed
+
+
+def check_drop_provenance(input_ids, output_ids, merge_log=None, dropped_test_ids=None) -> list:
+    """
+    Every input Id missing from write-back must be either an explicit test-data
+    drop or absorbed into a survivor via email, phone, or name+company.
+    """
+    violations = []
+    inputs = set(_ids(input_ids))
+    outputs = set(_ids(output_ids))
+    dropped_test = set(_ids(dropped_test_ids))
+    absorbed = {}
+    for entry in merge_log or []:
+        survivor = cell(entry.get("surviving_lead_id", ""))
+        per_loser = _parse_absorbed_signals(entry)
+        for loser, signals in per_loser.items():
+            absorbed[loser] = (survivor, signals)
+
+    unaccounted = []
+    weak = []
+    dangling = []
+    for lead_id in sorted(inputs):
+        if lead_id in outputs or lead_id in dropped_test:
+            continue
+        if lead_id not in absorbed:
+            unaccounted.append(lead_id)
+            continue
+        survivor, signals = absorbed[lead_id]
+        if not IDENTITY_SIGNALS.intersection(signals):
+            weak.append(lead_id)
+        seen = {lead_id}
+        cursor = survivor
+        while cursor in absorbed and cursor not in outputs and cursor not in dropped_test:
+            if cursor in seen:
+                break
+            seen.add(cursor)
+            cursor = absorbed[cursor][0]
+        if cursor not in outputs and cursor not in dropped_test:
+            dangling.append(f"{lead_id}->{survivor}")
+
+    if unaccounted:
+        violations.append(
+            f"Leads disappeared with no paper trail: {_sample(unaccounted)}"
+        )
+    if weak:
+        violations.append(
+            "Leads merged without email/phone/name+company identity: "
+            f"{_sample(weak)}"
+        )
+    if dangling:
+        violations.append(
+            f"Merged leads point at a survivor that also vanished: {_sample(dangling)}"
+        )
+    return violations
+
+
+def check_records(records, rows_in=None, input_ids=None, merge_log=None, dropped_test_ids=None) -> list:
     """Return a list of human-readable invariant violations (empty means clean)."""
     violations = []
     records = list(records)
@@ -107,6 +185,17 @@ def check_records(records, rows_in=None) -> list:
 
     if rows_in is not None and len(records) > rows_in:
         violations.append(f"Row count grew: {rows_in} in, {len(records)} out")
+
+    if input_ids is not None:
+        output_ids = [cell(r.get("Id", "")) for r in records]
+        violations.extend(
+            check_drop_provenance(
+                input_ids,
+                output_ids,
+                merge_log=merge_log,
+                dropped_test_ids=dropped_test_ids,
+            )
+        )
 
     return violations
 

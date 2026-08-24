@@ -6,7 +6,7 @@ Usage: python dedupe_cli.py input.csv [output.csv]
 
 import sys
 from pathlib import Path
-from pipeline.tools import process_csv
+from pipeline.tools import format_run_summary, process_csv
 
 
 def main():
@@ -31,18 +31,9 @@ def main():
     log_path = dest.with_name("dedup_log.csv")
     if result.get("audit_csv"):
         log_path.write_text(result["audit_csv"], encoding="utf-8")
-    print("deduped.csv is ready." if dest.name == "deduped.csv" else f"{dest} is ready.")
-    print(f"Leads in: {result['leads_in']}")
-    print(f"Validation issues: {result['validation_issues']}")
-    print(f"Values normalized: {result['values_normalized']}")
-    print(f"Duplicates merged: {result['duplicates_merged']}")
-    print(f"Leads to write back: {result['leads_out']}")
-    if result["blank_email_kept"]:
-        print(f"Leads with no email (kept, not merged): {result['blank_email_kept']}")
-    if result.get("hitl_records"):
-        print(f"HITL review: {result['hitl_records']}")
-    if result.get("audit_csv"):
-        print("dedup_log.csv is ready.")
+    if dest.name != "deduped.csv":
+        print(f"{dest} is ready.")
+    print(format_run_summary(result["summary"]))
 
 
 if __name__ == "__main__":
