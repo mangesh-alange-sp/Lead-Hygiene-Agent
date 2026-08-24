@@ -41,7 +41,7 @@ def _format_initial(value: str, *, allow_digraph: bool = False) -> str:
         return f"{text[0].upper()}."
     if (
         allow_digraph
-        and re.fullmatch(r"[A-Za-z][a-z]", text)
+        and re.fullmatch(r"[A-Za-z]{2}", text)
         and not re.search(r"[aeiou]", text, re.I)
     ):
         return f"{text[0].upper()}.{text[1].upper()}."

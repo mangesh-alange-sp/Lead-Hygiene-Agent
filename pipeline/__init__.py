@@ -1,3 +1,3 @@
-from .tools import process_csv, run_dedup_pipeline
+from .tools import lookup_lead, process_csv, run_dedup_pipeline
 
-__all__ = ["process_csv", "run_dedup_pipeline"]
+__all__ = ["lookup_lead", "process_csv", "run_dedup_pipeline"]

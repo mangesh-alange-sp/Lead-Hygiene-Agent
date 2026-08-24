@@ -183,6 +183,51 @@ class SignalRules(unittest.TestCase):
         survivors, _ = dedupe_leads(records)
         self.assertEqual(len(survivors), 2)
 
+    def test_test_named_rows_do_not_merge_on_name_and_company(self):
+        records = [
+            _record("T1", "Test", "User", "", "", "Test Co"),
+            _record("T2", "Test", "User", "", "", "Test Arp"),
+            _record("T3", "Dummy", "Person", "", "", "Dummy Company"),
+            _record("T4", "Fake", "Name", "", "", "Sample Company"),
+        ]
+        for row in records:
+            row["data_quality_flags"] = "test_data"
+        result = score_pair(records[0], records[1])
+        self.assertFalse(result["auto_merge"])
+        self.assertFalse(result["hitl"])
+        survivors, merge_log = dedupe_leads(records)
+        self.assertEqual(len(survivors), 4)
+        self.assertFalse(any(entry.get("merged_from_ids") for entry in merge_log))
+
+    def test_first_name_edit_distance_is_not_identity(self):
+        result = score_pair(
+            _record("00Q001", "Jane", "Doe", "jane@acme.com", "", "Acme Corp"),
+            _record("00Q002", "Jake", "Doe", "jake@acme.com", "", "Acme Corp"),
+        )
+        self.assertFalse(result["auto_merge"])
+        self.assertNotIn("name+company", result["signals"])
+
+    def test_subset_company_tokens_are_not_the_same_company(self):
+        result = score_pair(
+            _record("00Q001", "Jane", "Doe", "jane@amazon.com", "", "Amazon.com Inc."),
+            _record("00Q002", "Jane", "Doe", "jane.doe@gmail.com", "", "Amazon Inc"),
+        )
+        self.assertFalse(result["auto_merge"])
+        self.assertNotIn("name+company", result["signals"])
+
+    def test_test_row_does_not_taint_a_real_survivor(self):
+        real = _record("00Q200", "Ada", "Chen", "ada.chen@sailpoint.com", "4155550100", "SailPoint Technologies")
+        test = _record("00Q201", "Ada", "Chen", "", "", "SailPoint Technologies")
+        test["data_quality_flags"] = "test_data"
+        survivors, merge_log = dedupe_leads([real, test])
+        self.assertEqual(len(survivors), 1)
+        self.assertEqual(survivors[0]["Id"], "00Q200")
+        self.assertNotIn("test_data", survivors[0]["data_quality_flags"].split("|"))
+        self.assertTrue(any("00Q201" in entry.get("merged_from_ids", "") for entry in merge_log))
+        self.assertTrue(
+            any("name+company" in entry.get("absorbed_match_signals", "") for entry in merge_log)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

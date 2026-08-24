@@ -9,17 +9,22 @@ Guarantees (see tests/test_dedupe_rules.py):
   * len(survivors) <= len(records)
   * every surviving Id exists in the input
   * no two survivors share an identical normalized email
+  * auto-merge requires exact email, name+company, or name+phone
+  * two test-data rows never merge unless they share an exact email
 """
 
 import pandas as pd
 from rapidfuzz import fuzz
 
-from .config import FIRST_NAME_ALIASES
+from .config import DUMMY_FULL_NAMES, FIRST_NAME_ALIASES, TEST_GIVEN_NAMES, TEST_SURNAMES
 from .domains import company_match_key, is_personal_domain
 from .textnorm import cell, digits_only, email_domain, email_local, email_local_fold, fold_text
 
 AUTO_MERGE_MIN = 70
 HIGH_MIN = 90
+# A merge is only legal when one of these is present. Weak fuzzy / junk-pattern
+# similarity is never enough, including "both rows look like test data".
+IDENTITY_SIGNALS = frozenset({"exact_email", "name+company", "name+phone"})
 # Written by validate/dedupe for internal routing; never part of the output CSV.
 INTERNAL_FIELDS = ("data_quality_flags", "hitl_review")
 
@@ -34,18 +39,38 @@ def _canonical_first(folded: str) -> str:
 
 
 def _first_compatible(a: str, b: str) -> bool:
+    """Alias or initial match only. Character-ratio similarity is not identity."""
     if not a or not b:
         return False
     if _canonical_first(a) and _canonical_first(a) == _canonical_first(b):
         return True
     a0, b0 = a.split()[0], b.split()[0]
-    if fuzz.ratio(a0, b0) >= 75:
-        return True
     if len(a0) == 1 and b0.startswith(a0):
         return True
     if len(b0) == 1 and a0.startswith(b0):
         return True
     return False
+
+
+def _placeholder_person(first_folded: str, last_folded: str) -> bool:
+    first = (first_folded or "").split()[0] if first_folded else ""
+    last = (last_folded or "").split()[0] if last_folded else ""
+    if first in TEST_GIVEN_NAMES or last in TEST_SURNAMES:
+        return True
+    return (first, last) in DUMMY_FULL_NAMES
+
+
+def _names_identity(row1, row2) -> bool:
+    """True only when both rows name the same real person (not junk/test tokens)."""
+    fn1, fn2 = fold_text(row1.get("FirstName", "")), fold_text(row2.get("FirstName", ""))
+    ln1, ln2 = fold_text(row1.get("LastName", "")), fold_text(row2.get("LastName", ""))
+    if not (fn1 and fn2 and ln1 and ln2):
+        return False
+    if _placeholder_person(fn1, ln1) or _placeholder_person(fn2, ln2):
+        return False
+    if ln1 != ln2:
+        return False
+    return _first_compatible(fn1, fn2)
 
 
 def _add_flag(current, flag: str) -> str:
@@ -74,20 +99,15 @@ def score_pair(row1, row2) -> dict:
     e2 = normalized_email(row2.get("Email", ""))
     if e1 and e2 and e1 == e2:
         signals.append("exact_email")
-        score += 100
+        score = max(score, 100)
 
-    fn1, fn2 = fold_text(row1.get("FirstName", "")), fold_text(row2.get("FirstName", ""))
-    ln1, ln2 = fold_text(row1.get("LastName", "")), fold_text(row2.get("LastName", ""))
-    names_ok = bool(
-        fn1 and fn2 and ln1 and ln2
-        and fuzz.ratio(ln1, ln2) >= 85
-        and _first_compatible(fn1, fn2)
-    )
+    names_ok = _names_identity(row1, row2)
+    fn1 = fold_text(row1.get("FirstName", ""))
+    fn2 = fold_text(row2.get("FirstName", ""))
 
     c1 = company_match_key(row1.get("Company", ""))
     c2 = company_match_key(row2.get("Company", ""))
-    company_sim = fuzz.token_set_ratio(c1, c2) if c1 and c2 else 0
-    same_company = company_sim >= 80
+    same_company = bool(c1 and c2 and c1 == c2)
 
     d1, d2 = email_domain(e1), email_domain(e2)
     same_domain = bool(d1 and d1 == d2 and not is_personal_domain(d1))
@@ -97,32 +117,44 @@ def score_pair(row1, row2) -> dict:
     same_phone = bool(p1 and p1 == p2 and len(p1) >= 7)
 
     if names_ok and same_company:
-        signals.append("name+company_fuzzy")
-        score += 80 if fuzz.ratio(ln1, ln2) >= 95 and _canonical_first(fn1) == _canonical_first(fn2) else 70
-    elif names_ok and same_domain:
-        signals.append("name+email_domain")
-        score += 70
-    elif names_ok and local_sim >= 80 and (same_company or same_domain):
-        signals.append("name+email_local")
-        score += 65
+        signals.append("name+company")
+        score = max(score, 80 if _canonical_first(fn1) == _canonical_first(fn2) else 70)
 
-    if same_phone:
+    if names_ok and same_phone:
+        signals.append("name+phone")
+        score = max(score, 75)
+    elif same_phone:
         signals.append("phone_shared")
-        score += 25
+        score = max(score, 25)
 
-    if names_ok and company_sim and company_sim < 70 and not same_phone and "exact_email" not in signals:
+    # Review-only: similar people without an identity field. Never auto-merge.
+    if names_ok and same_domain and "exact_email" not in signals and not same_company:
+        signals.append("name+email_domain")
+        score = max(score, 50)
+    elif names_ok and local_sim >= 80 and (same_company or same_domain) and "exact_email" not in signals:
+        signals.append("name+email_local")
+        score = max(score, 50)
+
+    if names_ok and c1 and c2 and not same_company and not same_phone and "exact_email" not in signals:
         signals.append("weak_company")
 
     unique = list(dict.fromkeys(signals))
+    both_test = _is_test_row(row1) and _is_test_row(row2)
+    # Two test rows may share a leftover real email; name/company/phone junk is not identity.
+    if both_test:
+        auto_merge = "exact_email" in unique
+    else:
+        auto_merge = bool(IDENTITY_SIGNALS.intersection(unique))
+
     phone_only = unique == ["phone_shared"]
-    weak = "weak_company" in unique and score < AUTO_MERGE_MIN
-    auto_merge = score >= AUTO_MERGE_MIN and not phone_only and not weak
+    weak = any(flag in unique for flag in ("weak_company", "name+email_domain", "name+email_local"))
+    hitl = (not auto_merge) and (not both_test) and (phone_only or weak)
 
     return {
         "signals": unique,
         "score": min(score, 100),
         "auto_merge": auto_merge,
-        "hitl": (not auto_merge) and (phone_only or weak or 0 < score < AUTO_MERGE_MIN),
+        "hitl": hitl,
     }
 
 
@@ -252,7 +284,12 @@ def merge_fields(winner, loser) -> dict:
             merged["Website"] = l_web
     if "data_quality_flags" in winner or "data_quality_flags" in loser:
         merged["data_quality_flags"] = cell(winner.get("data_quality_flags", ""))
+        winner_is_test = _is_test_row(winner)
         for part in cell(loser.get("data_quality_flags", "")).split("|"):
+            # Absorbing a test row must not taint a real survivor (that would
+            # drop the real lead from write-back).
+            if part == "test_data" and not winner_is_test:
+                continue
             merged["data_quality_flags"] = _add_flag(merged["data_quality_flags"], part)
     if "hitl_review" in winner or "hitl_review" in loser:
         if cell(winner.get("hitl_review", "")) == "Yes" or cell(loser.get("hitl_review", "")) == "Yes":
@@ -268,12 +305,18 @@ class _MergeTracker:
         self.signals = {}
         self.score = {}
         self.decision = {}
+        self.pair_signals = {}
+        self.survivor_of = {}
 
     def record_merge(self, survivor_id: str, loser_id: str, result: dict, absorbed: list):
         ids = self.merged_from.setdefault(survivor_id, [])
         for lead_id in [loser_id, *absorbed]:
             if lead_id and lead_id not in ids:
                 ids.append(lead_id)
+            if lead_id:
+                self.survivor_of[lead_id] = survivor_id
+        if loser_id:
+            self.pair_signals[loser_id] = list(result.get("signals") or [])
         self._add_signals(survivor_id, result)
         self.decision[survivor_id] = "auto_merge"
 
@@ -297,6 +340,11 @@ class _MergeTracker:
                 "match_signals_used": "|".join(self.signals.get(lead_id, [])),
                 "confidence_score": _confidence_label(self.score.get(lead_id, 0)),
                 "decision": self.decision.get(lead_id, ""),
+                "absorbed_match_signals": ";".join(
+                    f"{lid}:{'|'.join(self.pair_signals.get(lid, []))}"
+                    for lid in self.merged_from.get(lead_id, [])
+                    if lid
+                ),
             })
         return rows
 

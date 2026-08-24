@@ -39,6 +39,20 @@ EMAIL_TLD_TO_REGION = dict(CONFIG["email_tld_to_region"])
 EMAIL_COMPOUND_TLD_TO_REGION = dict(CONFIG["email_compound_tld_to_region"])
 COUNTRY_NAME_TO_REGION = dict(CONFIG["country_name_to_region"])
 DUMMY_PHONE_VALUES = frozenset(CONFIG["dummy_phone_values"])
+# Placeholder person names are not an identity signal for dedupe.
+DUMMY_FULL_NAMES = frozenset({
+    ("no", "contact"),
+    ("test", "user"),
+    ("test", "test"),
+    ("foo", "bar"),
+    ("asdf", "asdf"),
+    ("bad", "email"),
+})
+TEST_GIVEN_NAMES = frozenset({
+    "test", "dummy", "fake", "sample", "asdf", "qwerty", "abc", "abcd",
+    "foobar", "foo",
+})
+TEST_SURNAMES = frozenset({"test", "tester", "dummy", "fake", "asdf"})
 FIRST_NAME_ALIASES = {
     str(alias).lower(): str(canonical).lower()
     for alias, canonical in dict(CONFIG.get("first_name_aliases", {})).items()

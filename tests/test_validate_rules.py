@@ -27,6 +27,24 @@ class TestDataRules(unittest.TestCase):
         self.assertIn("00Q1", result["csv"])
         self.assertIn("dropped_test_data", result["audit_csv"])
 
+    def test_four_test_rows_are_not_collapsed_into_one(self):
+        csv_in = (
+            "Id,FirstName,LastName,Email,Phone,Company\n"
+            "T1,Test,User,a@test.com,,Test Co\n"
+            "T2,Test,User,b@test.com,,Test Arp\n"
+            "T3,Dummy,Person,c@test.com,,Dummy Company\n"
+            "T4,Fake,Name,d@test.org,,Sample Company\n"
+            "R1,Jane,Doe,jane@amazon.com,2065550100,Amazon\n"
+        )
+        result = process_csv(csv_in)
+        self.assertEqual(result["status"], "ok", result.get("message"))
+        self.assertEqual(result["duplicates_merged"], 0)
+        self.assertEqual(result["records_dropped"], 4)
+        self.assertIn("R1", result["csv"])
+        for lead_id in ("T1", "T2", "T3", "T4"):
+            self.assertNotIn(lead_id, result["csv"])
+        self.assertEqual(result["audit_csv"].count("dropped_test_data"), 4)
+
 
 class MissingContactRules(unittest.TestCase):
     def test_missing_email_is_held_for_review(self):

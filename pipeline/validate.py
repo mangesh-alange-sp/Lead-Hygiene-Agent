@@ -11,6 +11,7 @@ from .domains import (
     is_placeholder_domain,
     is_plausible_domain,
 )
+from .config import DUMMY_FULL_NAMES, TEST_GIVEN_NAMES, TEST_SURNAMES
 from .phone import is_junk_phone
 from .textnorm import cell, email_domain, fold_text, strip_excel_artifacts
 
@@ -21,19 +22,6 @@ RFC_EMAIL = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
 )
-DUMMY_FULL_NAMES = frozenset({
-    ("no", "contact"),
-    ("test", "user"),
-    ("test", "test"),
-    ("foo", "bar"),
-    ("asdf", "asdf"),
-    ("bad", "email"),
-})
-TEST_GIVEN_NAMES = frozenset({
-    "test", "dummy", "fake", "sample", "asdf", "qwerty", "abc", "abcd",
-    "foobar", "foo",
-})
-TEST_SURNAMES = frozenset({"test", "tester", "dummy", "fake", "asdf"})
 TEST_COMPANY_KEYS = frozenset({
     "test", "test arp", "dummy", "dummy company", "fake company", "sample company",
 })

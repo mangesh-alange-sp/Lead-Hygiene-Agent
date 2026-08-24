@@ -91,6 +91,11 @@ def case_company_token(token: str) -> str:
         labels = [part[:1].upper() + part[1:].lower() for part in bare.split(".")]
         return leading + ".".join(labels) + trailing
 
+    # Short all-caps / vowelless tokens are acronyms (BFG, NCI), not "Bfg".
+    if bare.isalpha() and 2 <= len(bare) <= 3 and bare.lower() not in SMALL_WORDS:
+        if bare.isupper() or not re.search(r"[aeiou]", bare, re.I):
+            return leading + bare.upper() + trailing
+
     titled = bare[:1].upper() + bare[1:].lower()
     titled = re.sub(r"\bMc([a-z])", lambda m: "Mc" + m.group(1).upper(), titled)
     titled = re.sub(r"\bO'([a-z])", lambda m: "O'" + m.group(1).upper(), titled)

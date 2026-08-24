@@ -265,6 +265,7 @@ class NameNormalizeTests(unittest.TestCase):
 
         self.assertEqual(normalize_name("Mr. John", "Smith"), ("John", "Smith"))
         self.assertEqual(normalize_name("Jk", "Ng"), ("J.K.", "Ng"))
+        self.assertEqual(normalize_name("JK", "Rowling"), ("J.K.", "Rowling"))
         self.assertEqual(normalize_name("Gokul", "S"), ("Gokul", "S."))
         self.assertEqual(normalize_name("Gokul", "S."), ("Gokul", "S."))
         self.assertEqual(normalize_name("Kuo-Tung", "Lin"), ("Kuo-Tung", "Lin"))
@@ -308,6 +309,88 @@ class GuardrailTests(unittest.TestCase):
     def test_unparseable_input_is_rejected(self):
         result = process_csv('Id,Email\n"unterminated,quote\n')
         self.assertIn(result["status"], {"ok", "error"})
+
+
+class RunSummaryTests(unittest.TestCase):
+    def test_process_csv_returns_a_complete_summary(self):
+        result, _ = _load_result()
+        summary = result["summary"]
+        self.assertEqual(summary["totals"]["leads_in"], result["leads_in"])
+        self.assertEqual(summary["totals"]["leads_out"], result["leads_out"])
+        self.assertEqual(summary["totals"]["duplicates_merged"], result["duplicates_merged"])
+        self.assertTrue(summary["merges"])
+        self.assertTrue(any(merge["merged_from_ids"] for merge in summary["merges"]))
+        self.assertEqual(len(summary["merge_lines"]), len(summary["merges"]))
+        absorbed = sum(len(merge["merged_from_ids"]) for merge in summary["merges"])
+        self.assertEqual(absorbed, result["duplicates_merged"])
+        for merge in summary["merges"]:
+            self.assertIn(merge["survivor_id"], merge["line"])
+            for absorbed_id in merge["merged_from_ids"]:
+                self.assertIn(absorbed_id, merge["line"])
+            self.assertIn("signals:", merge["line"])
+            self.assertIn("confidence:", merge["line"])
+        self.assertIn("Phone", summary["field_changes"])
+        self.assertGreater(summary["field_changes"]["Phone"]["count"], 0)
+        ids = {entry["id"] for entry in summary["directory"]}
+        self.assertIn("00Q001", ids)
+        self.assertIn("00Q013", ids)
+        dropped_ids = {row["id"] for row in summary["dropped"]}
+        self.assertIn("00Q013", dropped_ids)
+
+    def test_summary_covers_review_cases(self):
+        csv_in = (
+            "Id,FirstName,LastName,Email,Phone,Company,Title,Country\n"
+            "00Q1,David,Manaster,dmanaster@pg.com,,PROCTER AND GAMBLE,Director,\n"
+            "00Q2,Dave,Manaster,david.manaster@pg.com,5135550199,Procter & Gamble,Director,\n"
+            "00Q3,Test,Arp,abcd@test.com,,Test Arp,Intern,\n"
+            "00Q4,Pat,Lee,pat@amgen.com,099300286056,AMGEN INC.,"
+            "Director | Security Program Leadership,\n"
+        )
+        result = process_csv(csv_in)
+        self.assertEqual(result["status"], "ok", result.get("message"))
+        summary = result["summary"]
+        self.assertEqual(summary["totals"]["duplicates_merged"], 1)
+        self.assertEqual(summary["totals"]["records_dropped"], 1)
+        self.assertEqual(summary["dropped"][0]["id"], "00Q3")
+        self.assertTrue(any(merge["survivor_id"] in {"00Q1", "00Q2"} for merge in summary["merges"]))
+        from pipeline.tools import _agent_facing_summary, format_run_summary
+
+        self.assertTrue(any("Manaster" in line and "signals:" in line for line in summary["merge_lines"]))
+        self.assertIn("Manaster", format_run_summary(summary))
+        company_examples = [ex["to"] for ex in summary["field_changes"]["Company"]["examples"]]
+        self.assertTrue(any(value == "Amgen Inc." for value in company_examples))
+        title_examples = [ex["to"] for ex in summary["field_changes"]["Title"]["examples"]]
+        self.assertIn("Director", title_examples)
+        self.assertTrue(any("unformatted_phone" in row["flags"] for row in summary["hitl"]))
+        text = format_run_summary(summary)
+        facing = _agent_facing_summary(summary)
+        self.assertEqual(facing["merge_lines"], summary["merge_lines"])
+        self.assertNotIn("directory", facing)
+        self.assertIn("00Q3", " ".join(summary["critical_lines"]))
+        self.assertFalse(any("Amgen" in line for line in summary["critical_lines"]))
+        self.assertFalse(any("Account Executive" in line for line in summary.get("critical_lines", [])))
+        self.assertIn("Critical changes:", text)
+        self.assertIn("deduped.csv is ready.", text)
+        self.assertIn("Merges:", text)
+        self.assertIn("Dropped test rows:", text)
+
+    def test_critical_summary_skips_cosmetic_edits(self):
+        csv_in = (
+            "Id,FirstName,LastName,Email,Phone,Company,Title,Website,Industry\n"
+            "00Q1,JK,Rowling,willy@wonka.com,000-000-000,BFG,AE,lntecc.com,Software\n"
+            "00Q2,Ada,Chen,ada@castelity.de,+491724597285,Castelity,SDR,castelity.de,Business Services\n"
+        )
+        result = process_csv(csv_in)
+        self.assertEqual(result["status"], "ok", result.get("message"))
+        lines = " ".join(result["summary"]["critical_lines"])
+        self.assertIn("willy@wonka.com", lines)
+        self.assertIn("000-000-000", lines)
+        self.assertIn("lntecc.com", lines)
+        self.assertNotIn("J.K.", lines)
+        self.assertNotIn("Account Executive", lines)
+        self.assertNotIn("Technology", lines)
+        self.assertNotIn("https://castelity.de", lines)
+        self.assertNotIn("(+49)", lines)
 
 
 if __name__ == "__main__":
