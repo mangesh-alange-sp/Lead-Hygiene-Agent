@@ -1,4 +1,5 @@
 google-adk
+google-genai
 pandas
 phonenumbers
 rapidfuzz
