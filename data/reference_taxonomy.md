@@ -66,8 +66,12 @@ Alias tables only. `pipeline/taxonomy.py` reads each `##` section as `{alias: ca
 |---|---|
 | pg | Procter & Gamble |
 | p&g | Procter & Gamble |
+| p and g | Procter & Gamble |
 | procter and gamble | Procter & Gamble |
 | procter & gamble | Procter & Gamble |
+| amgen | Amgen Inc. |
+| amgen inc | Amgen Inc. |
+| amgen incorporated | Amgen Inc. |
 | sailpoint | SailPoint Technologies |
 | sailpoint tech | SailPoint Technologies |
 | sailpoint technologies | SailPoint Technologies |
@@ -99,6 +103,7 @@ Alias tables only. `pipeline/taxonomy.py` reads each `##` section as `{alias: ca
 | test company | INVALID |
 | n/a | INVALID |
 | unknown | INVALID |
+| missing co | INVALID |
 
 ## Industry
 
@@ -171,6 +176,7 @@ Alias tables only. `pipeline/taxonomy.py` reads each `##` section as `{alias: ca
 | nonprofit | Non-Profit |
 | non-profit | Non-Profit |
 | ngo | Non-Profit |
+| food | Food & Beverage |
 | food and beverage | Food & Beverage |
 | f&b | Food & Beverage |
 | fmcg | Food & Beverage |

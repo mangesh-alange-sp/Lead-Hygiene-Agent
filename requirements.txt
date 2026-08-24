@@ -1,5 +1,9 @@
 google-adk
 google-genai
 pandas
-phonenumbers
-rapidfuzz
+
+# Validation/normalization is library-backed, not regex-based:
+phonenumbers      # libphonenumber: phone validity + E.164 formatting
+email-validator   # RFC syntax + real MX deliverability lookup
+pandera           # hard schema gate on the finished write-back frame
+rapidfuzz         # duplicate scoring (dedupe matching, unchanged)
