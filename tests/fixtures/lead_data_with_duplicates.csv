@@ -1,0 +1,31 @@
+Id,FirstName,LastName,Email,Phone,Company,Title,Website,Industry,Country
+00Q001,Jane,Doe,jane@amazon.com,2065550100,Amazon.Com Inc.,PM,https://www.amazon.com,Software,US
+DUPE001,Jane,Doe,jane@amazon.com,2065550100,Amazon Inc,PM,amazon.com,Software,US
+00Q002,Lee,Bailey,l.bailey@mcd.com,3125550100,McDonald's GmbH,AE,https://www.mcdonalds.com,Food,US
+DUPE002,L,Bailey,lee.bailey@us.mcd.com,3125550100,McDonalds,AE,mcdonalds.com,Food,US
+00Q003,Hans,Büchert,h.buechert@buchert.de,+491701112223,Büchert GmbH,Engineer,https://buchert.de,Software,Germany
+DUPE003,Hans,Buchert,h.buchert@buchert.de,+491701112223,Buchert,Engineer,buchert.de,Software,Germany
+00Q004,Osei,Stephen,osei.stephen@honda.com,3105551234,Honda North America,Manager,honda.com,Automotive,US
+00Q005,Takehiko,Yazawa,takehiko.yazawa@honda.com,3105551234,American Honda Motor Co,Director,honda.com,Automotive,US
+00Q006,89,Tim,tim@aramco.com,7135550100,Saudi Aramco,Analyst,aramco.com,Energy,US
+00Q007,Pat,Smith,pat@acme.com,4155550100,Acme Corp,SDR,gmail.com,Software,US
+00Q008,No,Contact,,,Missing Co,Intern,,Software,US
+00Q009,Bad,Email,not-an-email,5551234567,Acme,Rep,acme.com,Software,US
+00Q010,Alex,Ng,alex@acme.com,6465550199,Acme Corp,PM,microsoft.com,Software,US
+00Q011,Kuo-Tung,Lin,kt.lin@example.com.tw,092-266-8345,TSMC,Engineer,,Semiconductor,Taiwan
+00Q012,Stéphane,Leprince,stephane.leprince@socgen.com,01 67 45 82 14,Societe Generale,Manager,,Finance,France
+00Q013,Ada,Chen,abcdrf@test.com,4155550199,SailPoint Technologies,AE,,Software,US
+00Q014,Willy,Wonka,willy@wonka.com,3125550199,Bfg,Owner,,Food,US
+00Q015,Harry,Potter,potter@stinks.com,2125550199,Hpworld,Analyst,,Software,US
+00Q016,Wei,Chen,wei.chen@mail.mil.tw,000-000-000,R.O.C Military Academy Department Of Politics,Instructor,,Education,Taiwan
+00Q017,Raj,Patel,raj.patel@larsentoubro.com,022-1234-5678,L&T Construction,Engineer,,Construction,India
+00Q018,Anja,Visser,anja.visser@asml.com,+31 40 268 3000,ASML Netherlands B.V.,Engineer,,Manufacturing,Netherlands
+00Q019,Chris,Cole,chris.cole@nciinc.com,7035550100,NCI Information Systems,PM,,Software,US
+00Q020,Maya,Brooks,maya.brooks@bcbs.com,3125550111,bcbs,Analyst,,Finance,US
+00Q021,Matthew,Caroffino,mcaroffino@acme.com,8605550100,Acme Corp,AE,oracle.com,Software,US
+00Q022,Gokul,S,gokul.s@yahoo.in,9845550100,Infosys,Developer,yahoo.in,Software,India
+00Q023,Terry,Ng,terry.ng@globalcorp.com,447911123456,cea,Analyst,,Software,
+00Q024,Manuel,Costa,manuel.costa@globalcorp.com,33612345678,Globalcorp,Manager,,Software,
+00Q025,Saiful,Rahman,saiful.rahman@globalcorp.com,60123456789,Globalcorp,Engineer,,Software,
+00Q026,Kenjiro,Sato,kenjiro.sato@globalcorp.com,819012345678,Globalcorp,Engineer,,Software,
+00Q027,Takashi,Mori,takashi.mori@globalcorp.com,81312345678,Globalcorp,Director,,Software,
