@@ -1,4 +1,3 @@
-certifi
 google-adk
 google-genai
 pandas
@@ -8,3 +7,4 @@ phonenumbers      # libphonenumber: phone validity + E.164 formatting
 email-validator   # RFC syntax + real MX deliverability lookup
 pandera           # hard schema gate on the finished write-back frame
 rapidfuzz         # duplicate scoring (dedupe matching, unchanged)
+certifi           # CA bundle for the Lusha call; macOS python.org ships none

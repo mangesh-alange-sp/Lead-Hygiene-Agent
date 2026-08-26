@@ -13,28 +13,41 @@ import urllib.request
 from typing import Optional
 from urllib.parse import urlparse
 
-import certifi
 import pandas as pd
 
-from .dedupe import PUBLIC_DOMAINS
-from .validate import BLANK_TOKENS
+from .domains import is_personal_domain
+from .textnorm import BLANK_TOKENS, alias_key
 
 LUSHA_CONTACTS_URL = "https://api.lusha.com/v3/contacts/search-and-enrich"
 LUSHA_COMPANIES_URL = "https://api.lusha.com/v3/companies/search-and-enrich"
 LUSHA_BATCH_SIZE = 100
 LUSHA_TIMEOUT_SECONDS = 45
-
-# Some Python installs ship no CA bundle, so urllib cannot verify TLS on its own.
-SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
-
-# Cloudflare rejects urllib's default user agent in front of api.lusha.com (error 1010).
-USER_AGENT = "lead-hygiene-agent/1.0"
+# Cloudflare rejects the default urllib user-agent with error 1010.
+LUSHA_USER_AGENT = "lead-hygiene-agent/1.0"
 
 PERSON_FIELDS = ("FirstName", "LastName", "Email", "Company", "Title", "Phone")
 COMPANY_FIELDS = ("Industry", "Website", "AnnualRevenue", "NumberOfEmployees")
 ENRICHABLE_FIELDS = PERSON_FIELDS + COMPANY_FIELDS
 EMAIL_TYPE_ORDER = {"work": 0, "unknown": 1, "private": 2}
 PHONE_TYPE_ORDER = {"work": 0, "direct": 1, "mobile": 2, "unknown": 3}
+# Lusha API list price per revealed data point.
+REVEAL_COST = {"emails": 1, "phones": 5}
+# Informal CSV headers still write back to the original column name.
+COLUMN_ALIASES = {
+    "AnnualRevenue": (
+        "Annual Revenue",
+        "annual_revenue",
+        "Revenue",
+    ),
+    "NumberOfEmployees": (
+        "No of employee",
+        "No of employees",
+        "Number of Employees",
+        "NoOfEmployees",
+        "Employees",
+        "Employee Count",
+    ),
+}
 
 
 def _cell(value) -> str:
@@ -48,8 +61,21 @@ def _is_blank(value) -> bool:
     return not _cell(value)
 
 
+def _actual_column(columns, field: str):
+    """Salesforce name, or the informal header the CSV actually uses."""
+    lookup = {str(name).strip().lower(): name for name in columns}
+    for candidate in (field, *COLUMN_ALIASES.get(field, ())):
+        found = lookup.get(candidate.strip().lower())
+        if found is not None:
+            return found
+    return None
+
+
 def _needs_fill(row: pd.Series, fields) -> bool:
-    return any(field in row.index and _is_blank(row.get(field)) for field in fields)
+    return any(
+        (col := _actual_column(row.index, field)) is not None and _is_blank(row.get(col))
+        for field in fields
+    )
 
 
 def _host_from_website(url: str) -> str:
@@ -75,7 +101,7 @@ def _company_domain(row: pd.Series) -> str:
     if "@" not in email:
         return ""
     domain = email.split("@", 1)[1]
-    return "" if domain in PUBLIC_DOMAINS else domain
+    return "" if is_personal_domain(domain) else domain
 
 
 def _contact_identifier(row: pd.Series, row_id: str) -> Optional[dict]:
@@ -129,9 +155,10 @@ def _pick_phone(phones) -> str:
 
 
 def _fill(df: pd.DataFrame, idx, field: str, new_value: str) -> int:
-    if field not in df.columns or not _cell(new_value) or not _is_blank(df.at[idx, field]):
+    col = _actual_column(df.columns, field)
+    if col is None or not _cell(new_value) or not _is_blank(df.at[idx, col]):
         return 0
-    df.at[idx, field] = new_value
+    df.at[idx, col] = new_value
     return 1
 
 
@@ -184,6 +211,22 @@ def _api_key() -> str:
     return (os.environ.get("LUSHA_API_KEY") or os.environ.get("LUSHA_APIKEY") or "").strip()
 
 
+def _tls_context() -> ssl.SSLContext:
+    """
+    A python.org macOS install ships no trust store, so the default context
+    verifies against nothing and every HTTPS call fails. Fall back to the
+    certifi bundle rather than weakening verification.
+    """
+    context = ssl.create_default_context()
+    if context.get_ca_certs():
+        return context
+    try:
+        import certifi
+    except ImportError:
+        return context
+    return ssl.create_default_context(cafile=certifi.where())
+
+
 def _lusha_post(url: str, payload: dict) -> dict:
     key = _api_key()
     if not key:
@@ -193,6 +236,7 @@ def _lusha_post(url: str, payload: dict) -> dict:
         }
 
     body = json.dumps(payload).encode("utf-8")
+    context = _tls_context()
     last_error = "Lusha request failed."
     for attempt in range(3):
         request = urllib.request.Request(
@@ -203,12 +247,12 @@ def _lusha_post(url: str, payload: dict) -> dict:
                 "api_key": key,
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": USER_AGENT,
+                "User-Agent": LUSHA_USER_AGENT,
             },
         )
         try:
             with urllib.request.urlopen(
-                request, timeout=LUSHA_TIMEOUT_SECONDS, context=SSL_CONTEXT
+                request, timeout=LUSHA_TIMEOUT_SECONDS, context=context
             ) as response:
                 raw = response.read().decode("utf-8")
             data = json.loads(raw) if raw else {}
@@ -241,18 +285,137 @@ def _chunks(items: list, size: int):
         yield items[start:start + size]
 
 
-def _reveal_for_rows(df: pd.DataFrame, indices) -> list:
+def _needed_reveal(df: pd.DataFrame, idx) -> tuple:
+    """Paid data points this one row is missing. Never widened to the batch."""
     reveal = []
-    if any("Email" in df.columns and _is_blank(df.at[idx, "Email"]) for idx in indices):
+    if "Email" in df.columns and _is_blank(df.at[idx, "Email"]):
         reveal.append("emails")
-    if any("Phone" in df.columns and _is_blank(df.at[idx, "Phone"]) for idx in indices):
+    if "Phone" in df.columns and _is_blank(df.at[idx, "Phone"]):
         reveal.append("phones")
-    return reveal
+    return tuple(reveal)
+
+
+def _company_key(row: pd.Series):
+    """Domain first so 'CEA' and 'Globalcorp' on globalcorp.com are one lookup."""
+    domain = _company_domain(row).lower()
+    if domain:
+        return ("domain", domain)
+    name = alias_key(row.get("Company", ""))
+    return ("name", name) if name else None
+
+
+def _enrich_companies(df: pd.DataFrame, stats: dict) -> tuple:
+    """One 1-credit company profile per unique company, copied onto every row that shares it."""
+    rows_by_key = {}
+    for idx, row in df.iterrows():
+        if not _needs_fill(row, COMPANY_FIELDS):
+            continue
+        key = _company_key(row)
+        if key is None:
+            continue
+        rows_by_key.setdefault(key, []).append(idx)
+
+    items = []
+    key_by_ref = {}
+    for number, (key, indices) in enumerate(rows_by_key.items()):
+        row = df.loc[indices[0]]
+        ref = f"co{number}"
+        item = {"clientReferenceId": ref}
+        name = _cell(row.get("Company", ""))
+        domain = _company_domain(row)
+        if name:
+            item["name"] = name
+        if domain:
+            item["domain"] = domain
+        items.append(item)
+        key_by_ref[ref] = key
+
+    sent, matched = set(), set()
+    results_by_key = {}
+    for batch in _chunks(items, LUSHA_BATCH_SIZE):
+        payload = {"companies": batch, "options": {"includePartialProfiles": True}}
+        response = _lusha_post(LUSHA_COMPANIES_URL, payload)
+        if response.get("status") != "ok":
+            return sent, matched, response.get("message", "Company enrichment failed.")
+
+        billing = response.get("billing") or {}
+        stats["credits_charged"] += int(billing.get("creditsCharged") or 0)
+
+        for item in batch:
+            sent.update(rows_by_key[key_by_ref[item["clientReferenceId"]]])
+        for result in response.get("results") or []:
+            if not isinstance(result, dict) or result.get("error"):
+                continue
+            key = key_by_ref.get(str(result.get("clientReferenceId")))
+            if key is not None:
+                results_by_key[key] = result
+
+    for key, result in results_by_key.items():
+        for idx in rows_by_key[key]:
+            filled = _apply_company(df, idx, result)
+            stats["fields_filled"] += filled
+            if filled:
+                matched.add(idx)
+    return sent, matched, None
+
+
+def _enrich_contacts(df: pd.DataFrame, stats: dict) -> tuple:
+    """
+    One request per reveal cohort. A row that already has a phone is never
+    billed for one, and rows missing only profile fields reveal nothing.
+    """
+    cohorts = {}
+    for idx, row in df.iterrows():
+        if not _needs_fill(row, PERSON_FIELDS):
+            continue
+        item = _contact_identifier(row, str(idx))
+        if not item:
+            continue
+        cohorts.setdefault(_needed_reveal(df, idx), []).append((idx, item))
+
+    sent, matched = set(), set()
+    # Cheapest cohorts first, so a credit limit is hit on phones rather than emails.
+    for reveal in sorted(cohorts, key=lambda r: sum(REVEAL_COST[field] for field in r)):
+        jobs = cohorts[reveal]
+        for batch in _chunks(jobs, LUSHA_BATCH_SIZE):
+            payload = {
+                "contacts": [item for _, item in batch],
+                "reveal": list(reveal),
+                "options": {"includePartialProfiles": True},
+            }
+            response = _lusha_post(LUSHA_CONTACTS_URL, payload)
+            if response.get("status") != "ok":
+                if reveal:
+                    return sent, matched, response.get("message", "Contact enrichment failed.")
+                # Profile-only lookups are optional; skip them rather than fail the run.
+                stats["profile_lookup_skipped"] = True
+                break
+
+            billing = response.get("billing") or {}
+            stats["credits_charged"] += int(billing.get("creditsCharged") or 0)
+
+            by_ref = {}
+            for result in response.get("results") or []:
+                if isinstance(result, dict) and result.get("clientReferenceId") is not None:
+                    by_ref[str(result["clientReferenceId"])] = result
+
+            for idx, item in batch:
+                sent.add(idx)
+                result = by_ref.get(item["clientReferenceId"])
+                if not result or result.get("error"):
+                    continue
+                stats["fields_filled"] += _apply_contact(df, idx, result)
+                matched.add(idx)
+    return sent, matched, None
 
 
 def enrich_dataframe(df: pd.DataFrame) -> tuple:
     """
     Search-and-enrich rows with missing enrichable fields.
+
+    Companies run first: a 1-credit company profile fills Website, Industry and
+    firmographics for every row sharing that company, which keeps rows that were
+    only missing company data out of the pricier contact calls.
     Returns (df, stats).
     """
     df = df.copy()
@@ -265,97 +428,18 @@ def enrich_dataframe(df: pd.DataFrame) -> tuple:
         "credits_charged": 0,
     }
 
-    contact_jobs = []
-    for idx, row in df.iterrows():
-        if not _needs_fill(row, ENRICHABLE_FIELDS):
-            stats["rows_skipped"] += 1
-            continue
-        item = _contact_identifier(row, str(idx))
-        if not item:
-            stats["rows_skipped"] += 1
-            continue
-        contact_jobs.append((idx, item))
+    company_sent, company_matched, error = _enrich_companies(df, stats)
+    if error:
+        return df, {**stats, "error": error}
 
-    stats["rows_attempted"] = len(contact_jobs)
+    contact_sent, contact_matched, error = _enrich_contacts(df, stats)
+    if error:
+        return df, {**stats, "error": error}
 
-    for batch in _chunks(contact_jobs, LUSHA_BATCH_SIZE):
-        indices = [idx for idx, _ in batch]
-        payload = {
-            "contacts": [item for _, item in batch],
-            "options": {"includePartialProfiles": True},
-        }
-        reveal = _reveal_for_rows(df, indices)
-        if reveal:
-            payload["reveal"] = reveal
-
-        response = _lusha_post(LUSHA_CONTACTS_URL, payload)
-        if response.get("status") != "ok":
-            return df, {**stats, "error": response.get("message", "Contact enrichment failed.")}
-
-        billing = response.get("billing") or {}
-        stats["credits_charged"] += int(billing.get("creditsCharged") or 0)
-
-        by_ref = {}
-        for result in response.get("results") or []:
-            if isinstance(result, dict) and result.get("clientReferenceId") is not None:
-                by_ref[str(result["clientReferenceId"])] = result
-
-        for idx, item in batch:
-            result = by_ref.get(item["clientReferenceId"])
-            if not result or result.get("error"):
-                stats["rows_not_found"] += 1
-                continue
-            filled = _apply_contact(df, idx, result)
-            stats["fields_filled"] += filled
-            stats["rows_matched"] += 1
-
-    company_rows = []
-    unique_items = []
-    seen = {}
-    for idx, row in df.iterrows():
-        if not _needs_fill(row, COMPANY_FIELDS):
-            continue
-        name = _cell(row.get("Company", ""))
-        domain = _company_domain(row)
-        if not name and not domain:
-            continue
-        key = (name.lower(), domain.lower())
-        company_rows.append((idx, key))
-        if key in seen:
-            continue
-        seen[key] = str(idx)
-        item = {"clientReferenceId": str(idx)}
-        if name:
-            item["name"] = name
-        if domain:
-            item["domain"] = domain
-        unique_items.append(item)
-
-    results_by_ref = {}
-    for batch in _chunks(unique_items, LUSHA_BATCH_SIZE):
-        payload = {
-            "companies": batch,
-            "options": {"includePartialProfiles": True},
-        }
-        response = _lusha_post(LUSHA_COMPANIES_URL, payload)
-        if response.get("status") != "ok":
-            return df, {**stats, "error": response.get("message", "Company enrichment failed.")}
-
-        billing = response.get("billing") or {}
-        stats["credits_charged"] += int(billing.get("creditsCharged") or 0)
-
-        for result in response.get("results") or []:
-            if isinstance(result, dict) and not result.get("error"):
-                results_by_ref[str(result.get("clientReferenceId"))] = result
-
-    contact_ids = {idx for idx, _ in contact_jobs}
-    for idx, key in company_rows:
-        result = results_by_ref.get(seen[key])
-        if not result:
-            continue
-        filled = _apply_company(df, idx, result)
-        stats["fields_filled"] += filled
-        if filled and idx not in contact_ids:
-            stats["rows_matched"] += 1
-
+    sent = company_sent | contact_sent
+    matched = company_matched | contact_matched
+    stats["rows_attempted"] = len(sent)
+    stats["rows_matched"] = len(matched)
+    stats["rows_not_found"] = len(sent - matched)
+    stats["rows_skipped"] = len(df) - len(sent)
     return df, stats

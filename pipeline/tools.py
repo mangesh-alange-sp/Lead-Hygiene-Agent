@@ -35,6 +35,10 @@ INTERNAL_COLS = (
     "Phone_raw", "change_reasons", "completeness_flag", "email_status",
 )
 PHONE_WRITE_COLS = ("Phone", "MobilePhone")
+ENRICH_REQUIRES_DEDUP_MESSAGE = (
+    "Cannot enrich: run_dedup_pipeline has not produced deduped.csv in this "
+    "session. Run dedup first."
+)
 AUDIT_FIELDS = (
     "surviving_lead_id",
     "merged_from_ids",
@@ -971,12 +975,20 @@ async def run_dedup_pipeline(csv_text: str, tool_context: ToolContext) -> dict:
         await tool_context.save_artifact(
             filename=result["excel_file"], artifact=review_part
         )
+        tool_context.state["deduped_csv_ready"] = True
         return payload
     except Exception:
         return {
             "status": "error",
             "message": "Dedup finished but the file could not be saved. Re-run the job.",
         }
+
+
+def require_deduped_csv(state) -> dict:
+    """Block enrichment until this session has saved deduped.csv."""
+    if (state or {}).get("deduped_csv_ready"):
+        return {"status": "ok"}
+    return {"status": "error", "message": ENRICH_REQUIRES_DEDUP_MESSAGE}
 
 
 def _part_to_text(part) -> str:
@@ -992,11 +1004,8 @@ def _part_to_text(part) -> str:
     return text or ""
 
 
-async def _load_csv_text(csv_text: str, tool_context: ToolContext) -> dict:
-    text = (csv_text or "").strip()
-    if text:
-        return {"status": "ok", "csv_text": csv_text}
-
+async def _load_deduped_csv(tool_context: ToolContext) -> dict:
+    """Enrichment may only read the write-back from a completed dedup run."""
     try:
         part = await tool_context.load_artifact(filename="deduped.csv")
     except TypeError:
@@ -1008,8 +1017,8 @@ async def _load_csv_text(csv_text: str, tool_context: ToolContext) -> dict:
     if not loaded:
         return {
             "status": "error",
-            "message": "No CSV text was provided and deduped.csv was not found. "
-            "Pass csv_text or run run_dedup_pipeline first.",
+            "message": "Cannot enrich: deduped.csv was not found. "
+            "Run run_dedup_pipeline first so it can produce that file.",
         }
     return {"status": "ok", "csv_text": loaded}
 
@@ -1046,19 +1055,25 @@ async def search_and_enrich(csv_text: str, tool_context: ToolContext) -> dict:
     """
     Enrich missing lead CSV fields with Lusha Search and Enrich.
 
+    Always reads the deduped.csv artifact from a prior run_dedup_pipeline
+    call. csv_text is ignored so a raw upload cannot skip hygiene. If
+    deduped.csv is missing the tool errors and spends no Lusha credits.
+
     Uses POST https://api.lusha.com/v3/contacts/search-and-enrich (up to 100
     contacts per request). Looks up each row by email, or by firstName +
     lastName + companyName/companyDomain. Reveals emails and phones only when
     those CSV cells are blank. Fills blank FirstName, LastName, Email, Company,
-    Title, Phone, Industry, and Website. Firmographics missing after the
-    contact call (AnnualRevenue, NumberOfEmployees, Industry, Website) are
-    filled from company search-and-enrich. Existing values are never overwritten.
+    Title, Phone, Industry, Website, AnnualRevenue, and NumberOfEmployees.
+    Existing values are never overwritten.
     LeadSource, Status, CreatedDate, and OwnerId are left unchanged.
 
-    Pass the CSV text, or an empty string to enrich the saved deduped.csv
-    artifact. Returns counts only; the write-back file is saved as enriched.csv.
+    Pass an empty string for csv_text. Returns counts only; the write-back
+    file is saved as enriched.csv.
     """
-    loaded = await _load_csv_text(csv_text, tool_context)
+    blocked = require_deduped_csv(tool_context.state)
+    if blocked["status"] != "ok":
+        return blocked
+    loaded = await _load_deduped_csv(tool_context)
     if loaded["status"] != "ok":
         return loaded
 
