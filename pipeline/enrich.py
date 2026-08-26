@@ -6,12 +6,14 @@ https://docs.lusha.com/apis/openapi/search-and-enrich/searchandenrichcontacts
 
 import json
 import os
+import ssl
 import time
 import urllib.error
 import urllib.request
 from typing import Optional
 from urllib.parse import urlparse
 
+import certifi
 import pandas as pd
 
 from .dedupe import PUBLIC_DOMAINS
@@ -21,6 +23,12 @@ LUSHA_CONTACTS_URL = "https://api.lusha.com/v3/contacts/search-and-enrich"
 LUSHA_COMPANIES_URL = "https://api.lusha.com/v3/companies/search-and-enrich"
 LUSHA_BATCH_SIZE = 100
 LUSHA_TIMEOUT_SECONDS = 45
+
+# Some Python installs ship no CA bundle, so urllib cannot verify TLS on its own.
+SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+
+# Cloudflare rejects urllib's default user agent in front of api.lusha.com (error 1010).
+USER_AGENT = "lead-hygiene-agent/1.0"
 
 PERSON_FIELDS = ("FirstName", "LastName", "Email", "Company", "Title", "Phone")
 COMPANY_FIELDS = ("Industry", "Website", "AnnualRevenue", "NumberOfEmployees")
@@ -195,10 +203,13 @@ def _lusha_post(url: str, payload: dict) -> dict:
                 "api_key": key,
                 "Content-Type": "application/json",
                 "Accept": "application/json",
+                "User-Agent": USER_AGENT,
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=LUSHA_TIMEOUT_SECONDS) as response:
+            with urllib.request.urlopen(
+                request, timeout=LUSHA_TIMEOUT_SECONDS, context=SSL_CONTEXT
+            ) as response:
                 raw = response.read().decode("utf-8")
             data = json.loads(raw) if raw else {}
             data["status"] = "ok"
