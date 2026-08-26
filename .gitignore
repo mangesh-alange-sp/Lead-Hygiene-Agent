@@ -1,6 +1,7 @@
 .venv/
 .adk/
 .env
+.cursor/
 __pycache__/
 *.pyc
 .DS_Store
