@@ -16,9 +16,9 @@ from .textnorm import cell
 from .website import is_free_provider_website
 
 MAX_VIOLATION_SAMPLES = 5
-_DOT_LOWER_RE = re.compile(r"\.[a-z]")
+DOT_LOWER_RE = re.compile(r"\.[a-z]")
 # Compared case-sensitively: 'S.r.l.' is the accepted form, 's.r.l.' is not.
-_WHITELISTED_DOTTED = set(DOTTED_LOWERCASE_WHITELIST) | {
+WHITELISTED_DOTTED = set(DOTTED_LOWERCASE_WHITELIST) | {
     form.rstrip(".") for form in DOTTED_LOWERCASE_WHITELIST
 }
 
@@ -27,7 +27,7 @@ class InvariantViolation(Exception):
     """Raised when a post-pipeline invariant fails. The run must not write output."""
 
 
-def _sample(items) -> str:
+def sample(items) -> str:
     items = list(items)
     head = ", ".join(str(item) for item in items[:MAX_VIOLATION_SAMPLES])
     suffix = f" (+{len(items) - MAX_VIOLATION_SAMPLES} more)" if len(items) > MAX_VIOLATION_SAMPLES else ""
@@ -40,7 +40,7 @@ def phone_has_text_marker(value) -> bool:
 
 
 # E.164 (+447771695127) and the legacy dashed form are both real phone shapes.
-_PLUS_CC_RE = re.compile(r"^\+\d[\d-]*$")
+PLUS_CC_RE = re.compile(r"^\+\d[\d-]*$")
 
 
 def phone_looks_like_excel_formula(value) -> bool:
@@ -53,7 +53,7 @@ def phone_looks_like_excel_formula(value) -> bool:
     if text[0] == "-":
         return True
     if text[0] == "+":
-        return not bool(_PLUS_CC_RE.match(text))
+        return not bool(PLUS_CC_RE.match(text))
     return False
 
 
@@ -88,9 +88,9 @@ def company_has_bad_dotted_case(value) -> bool:
         return False
     for token in text.split():
         bare = token.strip(",;:()[]\"'")
-        if not _DOT_LOWER_RE.search(bare):
+        if not DOT_LOWER_RE.search(bare):
             continue
-        if bare in _WHITELISTED_DOTTED or bare.rstrip(".") in _WHITELISTED_DOTTED:
+        if bare in WHITELISTED_DOTTED or bare.rstrip(".") in WHITELISTED_DOTTED:
             continue
         if is_domain_like(bare):
             continue
@@ -98,11 +98,11 @@ def company_has_bad_dotted_case(value) -> bool:
     return False
 
 
-def _ids(values) -> list:
+def ids(values) -> list:
     return [cell(value) for value in (values or []) if cell(value)]
 
 
-def _parse_absorbed_signals(entry: dict) -> dict:
+def parse_absorbed_signals(entry: dict) -> dict:
     """Map each absorbed Id to the signals that justified that hop."""
     parsed = {}
     raw = cell(entry.get("absorbed_match_signals", ""))
@@ -128,13 +128,13 @@ def check_drop_provenance(input_ids, output_ids, merge_log=None, dropped_test_id
     drop or absorbed into a survivor via email, phone, or name+company.
     """
     violations = []
-    inputs = set(_ids(input_ids))
-    outputs = set(_ids(output_ids))
-    dropped_test = set(_ids(dropped_test_ids))
+    inputs = set(ids(input_ids))
+    outputs = set(ids(output_ids))
+    dropped_test = set(ids(dropped_test_ids))
     absorbed = {}
     for entry in merge_log or []:
         survivor = cell(entry.get("surviving_lead_id", ""))
-        per_loser = _parse_absorbed_signals(entry)
+        per_loser = parse_absorbed_signals(entry)
         for loser, signals in per_loser.items():
             absorbed[loser] = (survivor, signals)
 
@@ -162,16 +162,16 @@ def check_drop_provenance(input_ids, output_ids, merge_log=None, dropped_test_id
 
     if unaccounted:
         violations.append(
-            f"Leads disappeared with no paper trail: {_sample(unaccounted)}"
+            f"Leads disappeared with no paper trail: {sample(unaccounted)}"
         )
     if weak:
         violations.append(
             "Leads merged without email/phone/name+company identity: "
-            f"{_sample(weak)}"
+            f"{sample(weak)}"
         )
     if dangling:
         violations.append(
-            f"Merged leads point at a survivor that also vanished: {_sample(dangling)}"
+            f"Merged leads point at a survivor that also vanished: {sample(dangling)}"
         )
     return violations
 
@@ -184,12 +184,12 @@ def check_records(records, rows_in=None, input_ids=None, merge_log=None, dropped
     marked = [cell(r.get("Id", "")) for r in records if phone_has_text_marker(r.get("Phone"))]
     marked += [cell(r.get("Id", "")) for r in records if phone_has_text_marker(r.get("MobilePhone"))]
     if marked:
-        violations.append(f"Phone values carry an Excel text marker: {_sample(marked)}")
+        violations.append(f"Phone values carry an Excel text marker: {sample(marked)}")
 
     formulas = [cell(r.get("Id", "")) for r in records if phone_looks_like_excel_formula(r.get("Phone"))]
     formulas += [cell(r.get("Id", "")) for r in records if phone_looks_like_excel_formula(r.get("MobilePhone"))]
     if formulas:
-        violations.append(f"Phone values would be evaluated as Excel formulas: {_sample(formulas)}")
+        violations.append(f"Phone values would be evaluated as Excel formulas: {sample(formulas)}")
 
     lost_cc = [
         cell(r.get("Id", ""))
@@ -203,12 +203,12 @@ def check_records(records, rows_in=None, input_ids=None, merge_log=None, dropped
     ]
     if lost_cc:
         violations.append(
-            f"Phone lost a country code that was present on input: {_sample(lost_cc)}"
+            f"Phone lost a country code that was present on input: {sample(lost_cc)}"
         )
 
     bad_case = [cell(r.get("Id", "")) for r in records if company_has_bad_dotted_case(r.get("Company"))]
     if bad_case:
-        violations.append(f"Company has lowercase after a dot outside the allowlist: {_sample(bad_case)}")
+        violations.append(f"Company has lowercase after a dot outside the allowlist: {sample(bad_case)}")
 
     free_sites = [
         f"{cell(r.get('Id', ''))}={cell(r.get('Website'))}"
@@ -216,7 +216,7 @@ def check_records(records, rows_in=None, input_ids=None, merge_log=None, dropped
         if is_free_provider_website(r.get("Website"))
     ]
     if free_sites:
-        violations.append(f"Website points at a free mail provider: {_sample(free_sites)}")
+        violations.append(f"Website points at a free mail provider: {sample(free_sites)}")
 
     seen = {}
     dupes = []
@@ -229,7 +229,7 @@ def check_records(records, rows_in=None, input_ids=None, merge_log=None, dropped
         else:
             seen[key] = cell(record.get("Id", ""))
     if dupes:
-        violations.append(f"Duplicate normalized emails survived: {_sample(dupes)}")
+        violations.append(f"Duplicate normalized emails survived: {sample(dupes)}")
 
     if rows_in is not None and len(records) > rows_in:
         violations.append(f"Row count grew: {rows_in} in, {len(records)} out")

@@ -4,24 +4,23 @@ Shared string-cleaning utilities. Every function here is pure and has its own
 tests (tests/test_textnorm.py) because the transformation modules depend on it.
 """
 
+import math
 import re
 import unicodedata
 
 BLANK_TOKENS = frozenset({"", "n/a", "unknown", "nan", "none", "null", "nat", "-", "--"})
 
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_EXCEL_LEAD_CHARS = frozenset({"'", "\t", "=", "@", "\u200b", "\u00a0"})
+CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+EXCEL_LEAD_CHARS = frozenset({"'", "\t", "=", "@", "\u200b", "\u00a0"})
 
 
 def cell(value) -> str:
     """Coerce any CSV/pandas cell to a trimmed string, mapping blank tokens to ''."""
     if value is None:
         return ""
-    if isinstance(value, float):
-        # Avoids a pandas import here; NaN is the only float that fails self-equality.
-        if value != value:
-            return ""
-    text = _CONTROL_RE.sub("", str(value)).strip()
+    if isinstance(value, float) and math.isnan(value):
+        return ""
+    text = CONTROL_RE.sub("", str(value)).strip()
     return "" if text.lower() in BLANK_TOKENS else text
 
 
@@ -32,7 +31,7 @@ def strip_excel_artifacts(value) -> str:
     Intended for numeric-ish fields; do not run it on Email.
     """
     text = cell(value)
-    while text and text[0] in _EXCEL_LEAD_CHARS:
+    while text and text[0] in EXCEL_LEAD_CHARS:
         text = text[1:].strip()
     return text
 

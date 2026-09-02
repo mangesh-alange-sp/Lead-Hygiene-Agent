@@ -37,7 +37,7 @@ class FieldChange(NamedTuple):
     new: str
 
 
-def _rows_by_id(csv_text: str) -> dict:
+def rows_by_id(csv_text: str) -> dict:
     rows = {}
     for row in csv.DictReader(io.StringIO(csv_text)):
         lead_id = cell(row.get("Id", ""))
@@ -73,7 +73,7 @@ def diff_against_golden(csv_text: str, golden_path: Path = GOLDEN_PATH) -> list:
     if not path.exists():
         return []
     return diff_records(
-        _rows_by_id(path.read_text(encoding="utf-8")), _rows_by_id(csv_text)
+        rows_by_id(path.read_text(encoding="utf-8")), rows_by_id(csv_text)
     )
 
 

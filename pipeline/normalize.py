@@ -19,21 +19,21 @@ from .textnorm import alias_key, cell as _cell
 from .website import resolve_website_with_reason
 
 
-def _tax_key(value: str) -> str:
+def tax_key(value: str) -> str:
     return alias_key(value)
 
 
-def _lookup(section: str, value: str):
-    return TAXONOMY.get(section, {}).get(_tax_key(value))
+def lookup(section: str, value: str):
+    return TAXONOMY.get(section, {}).get(tax_key(value))
 
 
 def infer_phone_region(email: str = "", country: str = "", phone: str = "") -> str:
     """Kept for callers that only need the region signal."""
-    mapped = _lookup("country", country) or _cell(country)
+    mapped = lookup("country", country) or _cell(country)
     return infer_region(email=email, country=mapped, phone=phone)
 
 
-def _format_initial(value: str, *, allow_digraph: bool = False) -> str:
+def format_initial(value: str, *, allow_digraph: bool = False) -> str:
     """Single letter or dotted initial -> 'J.'; optional 'Jk' (no vowel) -> 'J.K.'."""
     text = value.strip()
     if re.fullmatch(r"[A-Za-z]\.*", text):
@@ -47,10 +47,10 @@ def _format_initial(value: str, *, allow_digraph: bool = False) -> str:
     return ""
 
 
-def _case_name_token(token: str, *, allow_digraph: bool = False) -> str:
+def case_name_token(token: str, *, allow_digraph: bool = False) -> str:
     if not token:
         return token
-    initial = _format_initial(token, allow_digraph=allow_digraph)
+    initial = format_initial(token, allow_digraph=allow_digraph)
     if initial:
         return initial
     leading = re.match(r"^[^A-Za-z]*", token).group(0)
@@ -60,7 +60,7 @@ def _case_name_token(token: str, *, allow_digraph: bool = False) -> str:
         return token
     if "-" in bare:
         return leading + "-".join(
-            _case_name_token(part, allow_digraph=allow_digraph) for part in bare.split("-")
+            case_name_token(part, allow_digraph=allow_digraph) for part in bare.split("-")
         ) + trailing
     if "." in bare:
         labels = [(part[:1].upper() + part[1:].lower()) if part else "" for part in bare.split(".")]
@@ -89,8 +89,8 @@ def normalize_name(first_name: str, last_name: str) -> tuple:
         flags=re.IGNORECASE,
     )
 
-    fn_parts = [_case_name_token(part, allow_digraph=True) for part in fn.split() if part]
-    ln_parts = [_case_name_token(part, allow_digraph=False) for part in ln.split() if part]
+    fn_parts = [case_name_token(part, allow_digraph=True) for part in fn.split() if part]
+    ln_parts = [case_name_token(part, allow_digraph=False) for part in ln.split() if part]
     return " ".join(fn_parts), " ".join(ln_parts)
 
 
@@ -99,7 +99,7 @@ def normalize_company(company_raw: str) -> str:
     raw_clean = _cell(company_raw)
     if not raw_clean:
         return ""
-    if _lookup("invalid", raw_clean) == "INVALID":
+    if lookup("invalid", raw_clean) == "INVALID":
         return ""
     mapped = resolve_company_alias(raw_clean)
     if mapped:
@@ -112,16 +112,16 @@ def normalize_title(title_raw: str) -> str:
     raw_clean = _cell(title_raw)
     if not raw_clean:
         return ""
-    raw_clean = _primary_title(raw_clean)
+    raw_clean = primary_title(raw_clean)
 
-    mapped = _lookup("title", raw_clean)
+    mapped = lookup("title", raw_clean)
     if mapped:
         return mapped
 
     title_tax = TAXONOMY.get("title", {})
     words = []
     for word in raw_clean.split():
-        key = _tax_key(word)
+        key = tax_key(word)
         if key in title_tax:
             words.append(title_tax[key])
             continue
@@ -139,7 +139,7 @@ def normalize_title(title_raw: str) -> str:
     return rendered
 
 
-def _primary_title(value: str) -> str:
+def primary_title(value: str) -> str:
     """Keep the job title before LinkedIn-style '| role | scope' stuffing."""
     if "|" not in value:
         return value
@@ -158,11 +158,11 @@ def is_low_quality_title(title) -> bool:
     return compact.upper() not in TITLE_ACRONYMS
 
 
-def _apply_map(section: str, value: str, title_case: bool = False) -> str:
+def apply_map(section: str, value: str, title_case: bool = False) -> str:
     text = _cell(value)
     if not text:
         return ""
-    mapped = _lookup(section, text)
+    mapped = lookup(section, text)
     if mapped:
         return mapped
     return text.title() if title_case else text
@@ -175,7 +175,7 @@ def normalize_street(value: str) -> str:
     street = TAXONOMY.get("street", {})
     words = []
     for word in text.split():
-        mapped = street.get(_tax_key(word))
+        mapped = street.get(tax_key(word))
         words.append(mapped or word.title())
     return " ".join(words)
 
@@ -212,7 +212,7 @@ def normalize_employees(value: str) -> str:
     return str(int(number * factor))
 
 
-def _set_if_changed(df, idx, field, new_value, old_value) -> int:
+def set_if_changed(df, idx, field, new_value, old_value) -> int:
     if field not in df.columns:
         return 0
     new_value = "" if new_value is None else str(new_value)
@@ -223,16 +223,16 @@ def _set_if_changed(df, idx, field, new_value, old_value) -> int:
     return 0
 
 
-def _add_flag(current: str, flag: str) -> str:
+def add_flag(current: str, flag: str) -> str:
     flags = [part for part in (current or "").split("|") if part]
     if flag not in flags:
         flags.append(flag)
     return "|".join(flags)
 
 
-def _flag_row(df, idx, flag: str, *, hitl: bool = False):
+def flag_row(df, idx, flag: str, *, hitl: bool = False):
     if "data_quality_flags" in df.columns:
-        df.at[idx, "data_quality_flags"] = _add_flag(df.at[idx, "data_quality_flags"], flag)
+        df.at[idx, "data_quality_flags"] = add_flag(df.at[idx, "data_quality_flags"], flag)
     if hitl and "hitl_review" in df.columns:
         df.at[idx, "hitl_review"] = "Yes"
 
@@ -250,12 +250,12 @@ def normalize_dataframe(df: pd.DataFrame) -> tuple:
 
     for idx, row in df.iterrows():
         fn, ln = normalize_name(row.get("FirstName"), row.get("LastName"))
-        norm_count += _set_if_changed(df, idx, "FirstName", fn, row.get("FirstName"))
-        norm_count += _set_if_changed(df, idx, "LastName", ln, row.get("LastName"))
+        norm_count += set_if_changed(df, idx, "FirstName", fn, row.get("FirstName"))
+        norm_count += set_if_changed(df, idx, "LastName", ln, row.get("LastName"))
 
         email = _cell(row.get("Email", "")).lower()
-        norm_count += _set_if_changed(df, idx, "Email", email, row.get("Email"))
-        country = _apply_map("country", row.get("Country"), True)
+        norm_count += set_if_changed(df, idx, "Email", email, row.get("Email"))
+        country = apply_map("country", row.get("Country"), True)
         company = normalize_company(row.get("Company"))
 
         parsed = parse_phone(row.get("Phone"), email=email, company=company, country=country)
@@ -281,25 +281,25 @@ def normalize_dataframe(df: pd.DataFrame) -> tuple:
         if parsed.get("reason"):
             reasons.append(parsed["reason"])
 
-        norm_count += _set_if_changed(df, idx, "Company", company, row.get("Company"))
+        norm_count += set_if_changed(df, idx, "Company", company, row.get("Company"))
         title = normalize_title(row.get("Title"))
-        norm_count += _set_if_changed(df, idx, "Title", title, row.get("Title"))
+        norm_count += set_if_changed(df, idx, "Title", title, row.get("Title"))
         if is_low_quality_title(title):
-            _flag_row(df, idx, "low_quality_title", hitl=True)
-        norm_count += _set_if_changed(df, idx, "Phone", phone, row.get("Phone"))
+            flag_row(df, idx, "low_quality_title", hitl=True)
+        norm_count += set_if_changed(df, idx, "Phone", phone, row.get("Phone"))
         if parsed["status"] == "needs_review":
-            _flag_row(df, idx, "unformatted_phone", hitl=True)
-            _flag_row(df, idx, "needs_country_code_review", hitl=True)
+            flag_row(df, idx, "unformatted_phone", hitl=True)
+            flag_row(df, idx, "needs_country_code_review", hitl=True)
         if parsed["status"] == "unparseable" and row.get("Phone"):
-            _flag_row(df, idx, "garbage_phone", hitl=True)
+            flag_row(df, idx, "garbage_phone", hitl=True)
         if "MobilePhone" in df.columns:
             mobile_parsed = parse_phone(
                 row.get("MobilePhone"), email=email, company=company, country=country,
             )
             mobile = mobile_parsed["value"] or ""
-            norm_count += _set_if_changed(df, idx, "MobilePhone", mobile, row.get("MobilePhone"))
+            norm_count += set_if_changed(df, idx, "MobilePhone", mobile, row.get("MobilePhone"))
             if mobile_parsed["status"] == "needs_review":
-                _flag_row(df, idx, "unformatted_phone", hitl=True)
+                flag_row(df, idx, "unformatted_phone", hitl=True)
             if mobile_parsed.get("reason"):
                 reasons.append(mobile_parsed["reason"])
         existing_web = row.get("Website")
@@ -307,37 +307,37 @@ def normalize_dataframe(df: pd.DataFrame) -> tuple:
         website = website or ""
         if web_reason:
             reasons.append(web_reason)
-        norm_count += _set_if_changed(df, idx, "Website", website, existing_web)
+        norm_count += set_if_changed(df, idx, "Website", website, existing_web)
         df.at[idx, "change_reasons"] = " | ".join(part for part in reasons if part)
-        norm_count += _set_if_changed(
-            df, idx, "Industry", _apply_map("industry", row.get("Industry"), True), row.get("Industry")
+        norm_count += set_if_changed(
+            df, idx, "Industry", apply_map("industry", row.get("Industry"), True), row.get("Industry")
         )
-        norm_count += _set_if_changed(df, idx, "Country", country, row.get("Country"))
-        norm_count += _set_if_changed(
-            df, idx, "State", _apply_map("state", row.get("State"), True), row.get("State")
+        norm_count += set_if_changed(df, idx, "Country", country, row.get("Country"))
+        norm_count += set_if_changed(
+            df, idx, "State", apply_map("state", row.get("State"), True), row.get("State")
         )
-        norm_count += _set_if_changed(
-            df, idx, "LeadSource", _apply_map("lead source", row.get("LeadSource")), row.get("LeadSource")
+        norm_count += set_if_changed(
+            df, idx, "LeadSource", apply_map("lead source", row.get("LeadSource")), row.get("LeadSource")
         )
-        norm_count += _set_if_changed(
-            df, idx, "Status", _apply_map("status", row.get("Status")), row.get("Status")
+        norm_count += set_if_changed(
+            df, idx, "Status", apply_map("status", row.get("Status")), row.get("Status")
         )
-        norm_count += _set_if_changed(
+        norm_count += set_if_changed(
             df, idx, "Street", normalize_street(row.get("Street")), row.get("Street")
         )
-        norm_count += _set_if_changed(
+        norm_count += set_if_changed(
             df, idx, "City", _cell(row.get("City")).title(), row.get("City")
         )
-        norm_count += _set_if_changed(
+        norm_count += set_if_changed(
             df, idx, "AnnualRevenue", normalize_revenue(row.get("AnnualRevenue")), row.get("AnnualRevenue")
         )
-        norm_count += _set_if_changed(
+        norm_count += set_if_changed(
             df, idx, "NumberOfEmployees", normalize_employees(row.get("NumberOfEmployees")), row.get("NumberOfEmployees")
         )
-        consent = _apply_map("consent", row.get("HasOptedOutOfEmail"))
+        consent = apply_map("consent", row.get("HasOptedOutOfEmail"))
         if consent.lower() == "null":
             consent = ""
-        norm_count += _set_if_changed(
+        norm_count += set_if_changed(
             df, idx, "HasOptedOutOfEmail", consent, row.get("HasOptedOutOfEmail")
         )
 

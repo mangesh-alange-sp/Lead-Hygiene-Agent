@@ -62,6 +62,19 @@ python dedupe_cli.py path/to/leads.csv
 python dedupe_cli.py path/to/leads.csv path/to/cleaned.csv
 ```
 
+The job is Salesforce-shaped now: input and output are Lead columns. Today that
+CSV is a file (synthetic fixture or a Data Loader export). Later the same job
+reads and writes Lead over the API:
+
+```bash
+python dedupe_cli.py --source salesforce
+```
+
+That source needs `SALESFORCE_INSTANCE_URL` and `SALESFORCE_ACCESS_TOKEN` in
+`.env`. Until those are set, use the CSV path. Do not open `deduped.csv` in
+Excel and save it; import it with Data Loader, or use `deduped_excel_review.csv`
+only for viewing.
+
 Expected input is a Salesforce lead export. A typical header:
 
 ```text
@@ -84,8 +97,11 @@ Upload or paste a lead CSV. The agent calls `run_dedup_pipeline` once, saves `de
 
 ## Tests
 
+Activate the project environment first (`.venv`).
+
 ```bash
-.venv/bin/python -m unittest discover -s tests -t .
+pytest -vv
+pytest -vv -k phone
 ```
 
 Before changing a transformation, capture a baseline and declare which column the change may touch:
@@ -105,7 +121,10 @@ pipeline/
   normalize.py           # Taxonomy and field formatting
   dedupe.py              # Identity-based merge
   invariants.py          # Production gate before write-back
+  summary.py             # Changelog for the CLI and agent
   tools.py               # process_csv / ADK tools
+  lead_io.py             # csv now, salesforce later
+  salesforce_io.py       # Lead query and PATCH (when credentials are set)
 data/
   pipeline_config.json   # Allowlists, aliases, dummy values
   reference_taxonomy.md  # Title / company / industry maps
@@ -117,6 +136,9 @@ Edit `data/pipeline_config.json` and `data/reference_taxonomy.md` to extend acro
 
 ## Salesforce write-back
 
-Import `deduped.csv` with the original column set. Use `dedup_log.csv` for merge provenance (`merged_from_ids`, match signals, confidence) and review flags (`missing_email`, `unformatted_phone`, `company_email_mismatch`, …).
+**Now:** import `deduped.csv` with Data Loader (same columns as the export).
+**Later:** `--source salesforce` updates Lead by Id. Phone stays text (`+49…`).
+
+Use `dedup_log.csv` for merge provenance and review flags.
 
 This repo does not identify stale-but-valid data. Freshness needs Salesforce dates such as `LastModifiedDate` or `LastActivityDate` on the export; those are not in the current column set.

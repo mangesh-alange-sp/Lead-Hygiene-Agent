@@ -50,18 +50,18 @@ COLUMN_ALIASES = {
 }
 
 
-def _cell(value) -> str:
+def cell(value) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
     text = str(value).strip()
     return "" if text.lower() in BLANK_TOKENS else text
 
 
-def _is_blank(value) -> bool:
-    return not _cell(value)
+def is_blank(value) -> bool:
+    return not cell(value)
 
 
-def _actual_column(columns, field: str):
+def actual_column(columns, field: str):
     """Salesforce name, or the informal header the CSV actually uses."""
     lookup = {str(name).strip().lower(): name for name in columns}
     for candidate in (field, *COLUMN_ALIASES.get(field, ())):
@@ -71,15 +71,15 @@ def _actual_column(columns, field: str):
     return None
 
 
-def _needs_fill(row: pd.Series, fields) -> bool:
+def needs_fill(row: pd.Series, fields) -> bool:
     return any(
-        (col := _actual_column(row.index, field)) is not None and _is_blank(row.get(col))
+        (col := actual_column(row.index, field)) is not None and is_blank(row.get(col))
         for field in fields
     )
 
 
-def _host_from_website(url: str) -> str:
-    text = _cell(url)
+def host_from_website(url: str) -> str:
+    text = cell(url)
     if not text:
         return ""
     if "://" not in text:
@@ -93,23 +93,23 @@ def _host_from_website(url: str) -> str:
     return host
 
 
-def _company_domain(row: pd.Series) -> str:
-    host = _host_from_website(row.get("Website", ""))
+def company_domain(row: pd.Series) -> str:
+    host = host_from_website(row.get("Website", ""))
     if host:
         return host
-    email = _cell(row.get("Email", "")).lower()
+    email = cell(row.get("Email", "")).lower()
     if "@" not in email:
         return ""
     domain = email.split("@", 1)[1]
     return "" if is_personal_domain(domain) else domain
 
 
-def _contact_identifier(row: pd.Series, row_id: str) -> Optional[dict]:
-    email = _cell(row.get("Email", "")).lower()
-    first = _cell(row.get("FirstName", ""))
-    last = _cell(row.get("LastName", ""))
-    company = _cell(row.get("Company", ""))
-    domain = _company_domain(row)
+def contact_identifier(row: pd.Series, row_id: str) -> Optional[dict]:
+    email = cell(row.get("Email", "")).lower()
+    first = cell(row.get("FirstName", ""))
+    last = cell(row.get("LastName", ""))
+    company = cell(row.get("Company", ""))
+    domain = company_domain(row)
 
     item = {"clientReferenceId": row_id}
     if email:
@@ -134,64 +134,64 @@ def _contact_identifier(row: pd.Series, row_id: str) -> Optional[dict]:
     return item
 
 
-def _pick_email(emails) -> str:
+def pick_email(emails) -> str:
     if not isinstance(emails, list):
         return ""
     ranked = sorted(
-        (e for e in emails if isinstance(e, dict) and _cell(e.get("email"))),
+        (e for e in emails if isinstance(e, dict) and cell(e.get("email"))),
         key=lambda e: EMAIL_TYPE_ORDER.get(str(e.get("type") or "unknown"), 9),
     )
-    return _cell(ranked[0]["email"]).lower() if ranked else ""
+    return cell(ranked[0]["email"]).lower() if ranked else ""
 
 
-def _pick_phone(phones) -> str:
+def pick_phone(phones) -> str:
     if not isinstance(phones, list):
         return ""
     ranked = sorted(
-        (p for p in phones if isinstance(p, dict) and _cell(p.get("number"))),
+        (p for p in phones if isinstance(p, dict) and cell(p.get("number"))),
         key=lambda p: PHONE_TYPE_ORDER.get(str(p.get("type") or "unknown"), 9),
     )
-    return _cell(ranked[0]["number"]) if ranked else ""
+    return cell(ranked[0]["number"]) if ranked else ""
 
 
-def _fill(df: pd.DataFrame, idx, field: str, new_value: str) -> int:
-    col = _actual_column(df.columns, field)
-    if col is None or not _cell(new_value) or not _is_blank(df.at[idx, col]):
+def fill(df: pd.DataFrame, idx, field: str, new_value: str) -> int:
+    col = actual_column(df.columns, field)
+    if col is None or not cell(new_value) or not is_blank(df.at[idx, col]):
         return 0
     df.at[idx, col] = new_value
     return 1
 
 
-def _apply_contact(df: pd.DataFrame, idx, result: dict) -> int:
+def apply_contact(df: pd.DataFrame, idx, result: dict) -> int:
     filled = 0
-    filled += _fill(df, idx, "FirstName", result.get("firstName"))
-    filled += _fill(df, idx, "LastName", result.get("lastName"))
-    filled += _fill(df, idx, "Email", _pick_email(result.get("emails")))
-    filled += _fill(df, idx, "Phone", _pick_phone(result.get("phones")))
+    filled += fill(df, idx, "FirstName", result.get("firstName"))
+    filled += fill(df, idx, "LastName", result.get("lastName"))
+    filled += fill(df, idx, "Email", pick_email(result.get("emails")))
+    filled += fill(df, idx, "Phone", pick_phone(result.get("phones")))
 
     job = result.get("jobTitle") or {}
     title = job.get("title") if isinstance(job, dict) else job
-    filled += _fill(df, idx, "Title", title)
+    filled += fill(df, idx, "Title", title)
 
     company = result.get("company") or {}
     if isinstance(company, dict):
-        filled += _fill(df, idx, "Company", company.get("name"))
-        filled += _fill(df, idx, "Industry", company.get("industry"))
-        domain = _cell(company.get("domain"))
+        filled += fill(df, idx, "Company", company.get("name"))
+        filled += fill(df, idx, "Industry", company.get("industry"))
+        domain = cell(company.get("domain"))
         if domain and "://" not in domain:
             domain = f"https://{domain}"
-        filled += _fill(df, idx, "Website", domain)
+        filled += fill(df, idx, "Website", domain)
     return filled
 
 
-def _apply_company(df: pd.DataFrame, idx, result: dict) -> int:
+def apply_company(df: pd.DataFrame, idx, result: dict) -> int:
     filled = 0
-    filled += _fill(df, idx, "Company", result.get("name"))
-    filled += _fill(df, idx, "Industry", result.get("industry"))
-    domain = _cell(result.get("domain"))
+    filled += fill(df, idx, "Company", result.get("name"))
+    filled += fill(df, idx, "Industry", result.get("industry"))
+    domain = cell(result.get("domain"))
     if domain and "://" not in domain:
         domain = f"https://{domain}"
-    filled += _fill(df, idx, "Website", domain)
+    filled += fill(df, idx, "Website", domain)
 
     employees = result.get("employeeCount") or {}
     if isinstance(employees, dict):
@@ -199,19 +199,19 @@ def _apply_company(df: pd.DataFrame, idx, result: dict) -> int:
         if count is None:
             count = employees.get("min")
         if count is not None:
-            filled += _fill(df, idx, "NumberOfEmployees", str(int(count)))
+            filled += fill(df, idx, "NumberOfEmployees", str(int(count)))
 
     revenue = result.get("revenueRange") or {}
     if isinstance(revenue, dict) and revenue.get("min") is not None:
-        filled += _fill(df, idx, "AnnualRevenue", str(int(revenue["min"])))
+        filled += fill(df, idx, "AnnualRevenue", str(int(revenue["min"])))
     return filled
 
 
-def _api_key() -> str:
+def api_key() -> str:
     return (os.environ.get("LUSHA_API_KEY") or os.environ.get("LUSHA_APIKEY") or "").strip()
 
 
-def _tls_context() -> ssl.SSLContext:
+def tls_context() -> ssl.SSLContext:
     """
     A python.org macOS install ships no trust store, so the default context
     verifies against nothing and every HTTPS call fails. Fall back to the
@@ -227,8 +227,8 @@ def _tls_context() -> ssl.SSLContext:
     return ssl.create_default_context(cafile=certifi.where())
 
 
-def _lusha_post(url: str, payload: dict) -> dict:
-    key = _api_key()
+def lusha_post(url: str, payload: dict) -> dict:
+    key = api_key()
     if not key:
         return {
             "status": "error",
@@ -236,7 +236,7 @@ def _lusha_post(url: str, payload: dict) -> dict:
         }
 
     body = json.dumps(payload).encode("utf-8")
-    context = _tls_context()
+    context = tls_context()
     last_error = "Lusha request failed."
     for attempt in range(3):
         request = urllib.request.Request(
@@ -280,37 +280,37 @@ def _lusha_post(url: str, payload: dict) -> dict:
     return {"status": "error", "message": last_error}
 
 
-def _chunks(items: list, size: int):
+def chunks(items: list, size: int):
     for start in range(0, len(items), size):
         yield items[start:start + size]
 
 
-def _needed_reveal(df: pd.DataFrame, idx) -> tuple:
+def needed_reveal(df: pd.DataFrame, idx) -> tuple:
     """Paid data points this one row is missing. Never widened to the batch."""
     reveal = []
-    if "Email" in df.columns and _is_blank(df.at[idx, "Email"]):
+    if "Email" in df.columns and is_blank(df.at[idx, "Email"]):
         reveal.append("emails")
-    if "Phone" in df.columns and _is_blank(df.at[idx, "Phone"]):
+    if "Phone" in df.columns and is_blank(df.at[idx, "Phone"]):
         reveal.append("phones")
     return tuple(reveal)
 
 
-def _company_key(row: pd.Series):
+def company_key(row: pd.Series):
     """Domain first so 'CEA' and 'Globalcorp' on globalcorp.com are one lookup."""
-    domain = _company_domain(row).lower()
+    domain = company_domain(row).lower()
     if domain:
         return ("domain", domain)
     name = alias_key(row.get("Company", ""))
     return ("name", name) if name else None
 
 
-def _enrich_companies(df: pd.DataFrame, stats: dict) -> tuple:
+def enrich_companies(df: pd.DataFrame, stats: dict) -> tuple:
     """One 1-credit company profile per unique company, copied onto every row that shares it."""
     rows_by_key = {}
     for idx, row in df.iterrows():
-        if not _needs_fill(row, COMPANY_FIELDS):
+        if not needs_fill(row, COMPANY_FIELDS):
             continue
-        key = _company_key(row)
+        key = company_key(row)
         if key is None:
             continue
         rows_by_key.setdefault(key, []).append(idx)
@@ -321,8 +321,8 @@ def _enrich_companies(df: pd.DataFrame, stats: dict) -> tuple:
         row = df.loc[indices[0]]
         ref = f"co{number}"
         item = {"clientReferenceId": ref}
-        name = _cell(row.get("Company", ""))
-        domain = _company_domain(row)
+        name = cell(row.get("Company", ""))
+        domain = company_domain(row)
         if name:
             item["name"] = name
         if domain:
@@ -332,9 +332,9 @@ def _enrich_companies(df: pd.DataFrame, stats: dict) -> tuple:
 
     sent, matched = set(), set()
     results_by_key = {}
-    for batch in _chunks(items, LUSHA_BATCH_SIZE):
+    for batch in chunks(items, LUSHA_BATCH_SIZE):
         payload = {"companies": batch, "options": {"includePartialProfiles": True}}
-        response = _lusha_post(LUSHA_COMPANIES_URL, payload)
+        response = lusha_post(LUSHA_COMPANIES_URL, payload)
         if response.get("status") != "ok":
             return sent, matched, response.get("message", "Company enrichment failed.")
 
@@ -352,38 +352,38 @@ def _enrich_companies(df: pd.DataFrame, stats: dict) -> tuple:
 
     for key, result in results_by_key.items():
         for idx in rows_by_key[key]:
-            filled = _apply_company(df, idx, result)
+            filled = apply_company(df, idx, result)
             stats["fields_filled"] += filled
             if filled:
                 matched.add(idx)
     return sent, matched, None
 
 
-def _enrich_contacts(df: pd.DataFrame, stats: dict) -> tuple:
+def enrich_contacts(df: pd.DataFrame, stats: dict) -> tuple:
     """
     One request per reveal cohort. A row that already has a phone is never
     billed for one, and rows missing only profile fields reveal nothing.
     """
     cohorts = {}
     for idx, row in df.iterrows():
-        if not _needs_fill(row, PERSON_FIELDS):
+        if not needs_fill(row, PERSON_FIELDS):
             continue
-        item = _contact_identifier(row, str(idx))
+        item = contact_identifier(row, str(idx))
         if not item:
             continue
-        cohorts.setdefault(_needed_reveal(df, idx), []).append((idx, item))
+        cohorts.setdefault(needed_reveal(df, idx), []).append((idx, item))
 
     sent, matched = set(), set()
     # Cheapest cohorts first, so a credit limit is hit on phones rather than emails.
     for reveal in sorted(cohorts, key=lambda r: sum(REVEAL_COST[field] for field in r)):
         jobs = cohorts[reveal]
-        for batch in _chunks(jobs, LUSHA_BATCH_SIZE):
+        for batch in chunks(jobs, LUSHA_BATCH_SIZE):
             payload = {
                 "contacts": [item for _, item in batch],
                 "reveal": list(reveal),
                 "options": {"includePartialProfiles": True},
             }
-            response = _lusha_post(LUSHA_CONTACTS_URL, payload)
+            response = lusha_post(LUSHA_CONTACTS_URL, payload)
             if response.get("status") != "ok":
                 if reveal:
                     return sent, matched, response.get("message", "Contact enrichment failed.")
@@ -404,7 +404,7 @@ def _enrich_contacts(df: pd.DataFrame, stats: dict) -> tuple:
                 result = by_ref.get(item["clientReferenceId"])
                 if not result or result.get("error"):
                     continue
-                stats["fields_filled"] += _apply_contact(df, idx, result)
+                stats["fields_filled"] += apply_contact(df, idx, result)
                 matched.add(idx)
     return sent, matched, None
 
@@ -428,11 +428,11 @@ def enrich_dataframe(df: pd.DataFrame) -> tuple:
         "credits_charged": 0,
     }
 
-    company_sent, company_matched, error = _enrich_companies(df, stats)
+    company_sent, company_matched, error = enrich_companies(df, stats)
     if error:
         return df, {**stats, "error": error}
 
-    contact_sent, contact_matched, error = _enrich_contacts(df, stats)
+    contact_sent, contact_matched, error = enrich_contacts(df, stats)
     if error:
         return df, {**stats, "error": error}
 

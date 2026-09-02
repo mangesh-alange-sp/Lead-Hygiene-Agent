@@ -36,7 +36,7 @@ CALLING_CODES = sorted(set(REGION_CALLING.values()), key=len)
 NATIONAL_SEED = "923456789012345"
 
 
-def _national(cc: str, target_total: int = MIN_DIGITS_FOR_CC_PREFIX) -> str:
+def national_digits(cc: str, target_total: int = MIN_DIGITS_FOR_CC_PREFIX) -> str:
     low, high = CC_NATIONAL_LEN.get(cc, DEFAULT_NATIONAL_LEN)
     length = min(max(low, target_total - len(cc)), high)
     return NATIONAL_SEED[:length]
@@ -72,7 +72,7 @@ class OutputContractRules(unittest.TestCase):
 class CallingCodeRules(unittest.TestCase):
     def test_explicit_international_never_loses_its_calling_code(self):
         for cc in CALLING_CODES:
-            national = _national(cc)
+            national = national_digits(cc)
             for raw in (f"+{cc}{national}", f"+{cc} {national}", f"00{cc}{national}"):
                 with self.subTest(cc=cc, raw=raw):
                     result = normalize_phone(raw)
@@ -84,7 +84,7 @@ class CallingCodeRules(unittest.TestCase):
 
     def test_bare_digits_with_a_leading_calling_code_keep_it(self):
         for cc in CALLING_CODES:
-            national = _national(cc)
+            national = national_digits(cc)
             digits = cc + national
             if len(digits) < MIN_DIGITS_FOR_CC_PREFIX:
                 continue  # shorter than a NANP number: genuinely ambiguous

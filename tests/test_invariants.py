@@ -13,7 +13,7 @@ from pipeline.invariants import (
 )
 
 
-def _row(**overrides):
+def row(**overrides):
     row = {"Id": "00Q001", "Email": "pat@acme.com", "Phone": "+12065550100",
            "Company": "Acme Corp", "Website": "https://acme.com"}
     row.update(overrides)
@@ -22,7 +22,7 @@ def _row(**overrides):
 
 class CleanBatchTests(unittest.TestCase):
     def test_clean_batch_passes(self):
-        records = [_row(), _row(Id="00Q002", Email="jane@amazon.com", Company="Amazon.com Inc.",
+        records = [row(), row(Id="00Q002", Email="jane@amazon.com", Company="Amazon.com Inc.",
                               Website="https://amazon.com")]
         self.assertEqual(check_records(records, rows_in=2), [])
         assert_records(records, rows_in=2)
@@ -43,14 +43,14 @@ class PhoneMarkerTests(unittest.TestCase):
         self.assertFalse(phone_looks_like_excel_formula(""))
 
     def test_batch_fails_on_marked_phone(self):
-        violations = check_records([_row(Phone="'+12065550100")])
+        violations = check_records([row(Phone="'+12065550100")])
         self.assertTrue(any("text marker" in v for v in violations))
 
     def test_e164_phone_is_allowed(self):
-        self.assertEqual(check_records([_row(Phone="+12065550100")]), [])
+        self.assertEqual(check_records([row(Phone="+12065550100")]), [])
 
     def test_batch_fails_on_marked_mobile(self):
-        violations = check_records([_row(MobilePhone="'+12065550100")])
+        violations = check_records([row(MobilePhone="'+12065550100")])
         self.assertTrue(any("text marker" in v for v in violations))
 
     def test_unchanged_double_zero_form_is_not_a_lost_country_code(self):
@@ -75,38 +75,38 @@ class CompanyCasingTests(unittest.TestCase):
             self.assertTrue(company_has_bad_dotted_case(company), company)
 
     def test_batch_fails_on_bad_casing(self):
-        violations = check_records([_row(Company="R.o.c Military Academy")])
+        violations = check_records([row(Company="R.o.c Military Academy")])
         self.assertTrue(any("lowercase after a dot" in v for v in violations))
 
 
 class WebsiteTests(unittest.TestCase):
     def test_batch_fails_on_free_provider_website(self):
         for site in ("https://gmail.com", "yahoo.in", "https://www.hotmail.com"):
-            violations = check_records([_row(Website=site)])
+            violations = check_records([row(Website=site)])
             self.assertTrue(any("free mail provider" in v for v in violations), site)
 
 
 class EmailAndRowCountTests(unittest.TestCase):
     def test_batch_fails_on_duplicate_emails(self):
-        records = [_row(), _row(Id="00Q002")]
+        records = [row(), row(Id="00Q002")]
         violations = check_records(records)
         self.assertTrue(any("Duplicate normalized emails" in v for v in violations))
 
     def test_case_differences_still_count_as_duplicates(self):
-        records = [_row(Email="Pat@Acme.com"), _row(Id="00Q002", Email="pat@acme.com")]
+        records = [row(Email="Pat@Acme.com"), row(Id="00Q002", Email="pat@acme.com")]
         self.assertTrue(any("Duplicate" in v for v in check_records(records)))
 
     def test_blank_emails_are_allowed_to_repeat(self):
-        records = [_row(Id="00Q001", Email=""), _row(Id="00Q002", Email="")]
+        records = [row(Id="00Q001", Email=""), row(Id="00Q002", Email="")]
         self.assertEqual(check_records(records), [])
 
     def test_batch_fails_when_row_count_grows(self):
-        violations = check_records([_row(), _row(Id="00Q002", Email="b@acme.com")], rows_in=1)
+        violations = check_records([row(), row(Id="00Q002", Email="b@acme.com")], rows_in=1)
         self.assertTrue(any("Row count grew" in v for v in violations))
 
     def test_assert_records_raises(self):
         with self.assertRaises(InvariantViolation):
-            assert_records([_row(Phone="'+12065550100")])
+            assert_records([row(Phone="'+12065550100")])
 
 
 class DropProvenanceTests(unittest.TestCase):
@@ -163,7 +163,7 @@ class DropProvenanceTests(unittest.TestCase):
         )
 
     def test_batch_gate_fails_when_leads_vanish(self):
-        records = [_row(Id="00Q001")]
+        records = [row(Id="00Q001")]
         violations = check_records(
             records,
             rows_in=4,

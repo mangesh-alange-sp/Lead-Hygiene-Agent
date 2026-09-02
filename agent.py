@@ -1,10 +1,7 @@
 # agent.py
 #
-# Canonical ADK agent for this repo. There is no fix/ / fix4/ tree here —
-# do not fork another copy. Validate the single-agent pipeline (including
-# the golden-fixture gate) before any multi-agent or A2A work. If that
-# expansion happens later, every agent must emit change-reason entries in
-# the same technical_log shape used here.
+# Canonical ADK agent. root_agent is the deploy entry for ADK web,
+# Agent Engine, and Cloud Run (A2A). Session state lives on ToolContext.
 
 from google.adk.agents import Agent
 from google.adk.tools import FunctionTool

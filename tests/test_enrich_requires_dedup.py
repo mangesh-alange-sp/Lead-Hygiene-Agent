@@ -8,15 +8,15 @@ from pipeline.tools import require_deduped_csv, search_and_enrich
 
 class FakeContext:
     def __init__(self, artifacts=None, state=None):
-        self._artifacts = artifacts or {}
+        self.artifacts = artifacts or {}
         self.state = state if state is not None else {}
 
     async def load_artifact(self, filename=None, **kwargs):
         name = filename or kwargs.get("filename")
-        return self._artifacts.get(name)
+        return self.artifacts.get(name)
 
     async def save_artifact(self, filename, artifact):
-        self._artifacts[filename] = artifact
+        self.artifacts[filename] = artifact
         return 1
 
 

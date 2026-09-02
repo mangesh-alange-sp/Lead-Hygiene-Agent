@@ -35,15 +35,16 @@ UNKNOWN = "unknown"
 RESERVED_TLDS = ("test", "example", "invalid", "localhost")
 RESERVED_SECOND_LEVEL = ("example.com", "example.net", "example.org")
 
-_memo = {}
-_resolver = None
+# In-process answers for this run. disk_cache is the committed file.
+MX_MEMO = {}
+DNS_RESOLVER = None
 
 
-def _lookups_enabled() -> bool:
+def lookups_enabled() -> bool:
     return os.environ.get("LEAD_HYGIENE_MX_LOOKUP", "1") not in {"0", "false", "False"}
 
 
-def _load_cache() -> dict:
+def load_cache() -> dict:
     if not MX_CACHE_PATH.exists():
         return {}
     try:
@@ -53,14 +54,14 @@ def _load_cache() -> dict:
         return {}
 
 
-_disk_cache = _load_cache()
+MX_DISK_CACHE = load_cache()
 
 
-def _get_resolver():
-    global _resolver
-    if _resolver is None:
-        _resolver = caching_resolver(timeout=5)
-    return _resolver
+def get_resolver():
+    global DNS_RESOLVER
+    if DNS_RESOLVER is None:
+        DNS_RESOLVER = caching_resolver(timeout=5)
+    return DNS_RESOLVER
 
 
 def is_reserved_domain(domain) -> bool:
@@ -85,23 +86,24 @@ def domain_accepts_mail(domain) -> bool:
     host = cell(domain).lower()
     if not host:
         raise LookupError("no domain")
-    if host in _memo:
-        return _memo[host]
-    if host in _disk_cache:
-        _memo[host] = _disk_cache[host]
-        return _memo[host]
-    if not _lookups_enabled():
+    if host in MX_MEMO:
+        return MX_MEMO[host]
+    if host in MX_DISK_CACHE:
+        MX_MEMO[host] = MX_DISK_CACHE[host]
+        return MX_MEMO[host]
+    if not lookups_enabled():
         raise LookupError(f"MX lookup disabled and {host} is not cached")
     try:
         validate_email(
-            f"probe@{host}", check_deliverability=True, dns_resolver=_get_resolver(),
+            f"probe@{host}", check_deliverability=True, dns_resolver=get_resolver(),
         )
-        _memo[host] = True
+        MX_MEMO[host] = True
     except EmailNotValidError:
-        _memo[host] = False
-    except Exception as exc:  # resolver/network failure, not a verdict
+        MX_MEMO[host] = False
+    except Exception as exc:
+        # Network/DNS failure is not a verdict. Caller keeps the address.
         raise LookupError(f"MX lookup failed for {host}: {exc}") from exc
-    return _memo[host]
+    return MX_MEMO[host]
 
 
 def validate_lead_email(email):

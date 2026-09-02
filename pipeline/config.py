@@ -66,10 +66,10 @@ CALLING_CODES = tuple(sorted(set(REGION_CALLING.values()), key=len, reverse=True
 
 # One region per calling code. +1 resolves to US, +7 to RU, shared codes pick the
 # larger numbering plan holder so formatting stays stable.
-_CALLING_PREFERRED = {"1": "US", "7": "RU"}
+CALLING_PREFERRED = {"1": "US", "7": "RU"}
 CALLING_TO_REGION = {}
-for _region, _cc in REGION_CALLING.items():
-    if _cc in _CALLING_PREFERRED:
-        CALLING_TO_REGION[_cc] = _CALLING_PREFERRED[_cc]
+for region, cc in REGION_CALLING.items():
+    if cc in CALLING_PREFERRED:
+        CALLING_TO_REGION[cc] = CALLING_PREFERRED[cc]
     else:
-        CALLING_TO_REGION.setdefault(_cc, _region)
+        CALLING_TO_REGION.setdefault(cc, region)

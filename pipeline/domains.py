@@ -135,7 +135,7 @@ def domain_matches_company(host, company) -> bool:
     short = [token for token in significant if 1 <= len(token) <= 2]
     if 2 <= len(short) <= 4:
         acronym = "".join(short)
-        if any(_acronym_expands_in_label(acronym, label) for label in labels):
+        if any(acronym_expands_in_label(acronym, label) for label in labels):
             return True
     # mail.mil.tw / *.gov belongs with a military or government organization name.
     dotted = f".{root}."
@@ -145,7 +145,7 @@ def domain_matches_company(host, company) -> bool:
     return fuzz.token_set_ratio(root.replace(".", " "), key) >= 70
 
 
-def _acronym_expands_in_label(acronym: str, label: str) -> bool:
+def acronym_expands_in_label(acronym: str, label: str) -> bool:
     """True when each acronym letter starts a 3+ character chunk, e.g. L+T in larsentoubro."""
     if not acronym or not label or not label.startswith(acronym[0]):
         return False

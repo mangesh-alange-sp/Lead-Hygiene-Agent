@@ -28,11 +28,11 @@ class OutputSchemaViolation(Exception):
     """Raised when the finished frame fails the pandera gate."""
 
 
-def _digits(value) -> str:
+def digits(value) -> str:
     return re.sub(r"\D", "", str(value or ""))
 
 
-def _blank_or(series, pattern) -> pd.Series:
+def blank_or(series, pattern) -> pd.Series:
     text = series.fillna("").astype(str)
     return (text == "") | text.str.match(pattern)
 
@@ -45,7 +45,7 @@ def build_export_schema(expected_columns) -> pa.DataFrameSchema:
         if name == "Website":
             checks.append(
                 pa.Check(
-                    lambda s: _blank_or(s, WEBSITE_RE),
+                    lambda s: blank_or(s, WEBSITE_RE),
                     error="Website must be blank or start with http(s)://",
                 )
             )
@@ -106,8 +106,8 @@ def check_phone_states(df: pd.DataFrame) -> list:
     # an input that already carried +CC and then failed validation is preserved
     # verbatim, so it legitimately looks like E.164 while being needs_review.
     if "Phone_raw" in df.columns:
-        submitted = df["Phone_raw"].fillna("").astype(str).map(_digits)
-        kept = phone.map(_digits)
+        submitted = df["Phone_raw"].fillna("").astype(str).map(digits)
+        kept = phone.map(digits)
         violations += describe(
             has_phone
             & status.eq(STATUS_NEEDS_REVIEW)

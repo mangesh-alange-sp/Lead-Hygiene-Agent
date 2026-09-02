@@ -30,7 +30,7 @@ TEST_EMAIL_HOSTS = frozenset({"test.com", "test.org", "test.net", "testing.com"}
 AUDIT_COLS = ("data_quality_flags", "hitl_review")
 
 
-def _strip_formula(value, *, phone_field: bool = False) -> str:
+def strip_formula(value, *, phone_field: bool = False) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
     if phone_field:
@@ -43,21 +43,21 @@ def _strip_formula(value, *, phone_field: bool = False) -> str:
     return text
 
 
-def _add_flag(current: str, flag: str) -> str:
+def add_flag(current: str, flag: str) -> str:
     flags = [part for part in (current or "").split("|") if part]
     if flag not in flags:
         flags.append(flag)
     return "|".join(flags)
 
 
-def _website_host(value: str) -> str:
+def website_host(value: str) -> str:
     text = cell(value)
     if not text or ("@" in text and "://" not in text):
         return ""
     return host_of(text)
 
 
-def _garbage_name(value: str) -> bool:
+def garbage_name(value: str) -> bool:
     text = cell(value)
     if not text:
         return False
@@ -74,7 +74,7 @@ AUDIT_EXTRA_COLS = (
 )
 
 
-def _is_placeholder_contact(value) -> bool:
+def is_placeholder_contact(value) -> bool:
     text = cell(value)
     if not text:
         return True
@@ -87,9 +87,9 @@ def _is_placeholder_contact(value) -> bool:
 def is_junk_lead_values(company="", email="", phone="", *, has_phone: bool = True) -> bool:
     """True when Company, Email, and Phone are all missing or placeholder."""
     return (
-        _is_placeholder_contact(company)
-        and _is_placeholder_contact(email)
-        and (not has_phone or _is_placeholder_contact(phone))
+        is_placeholder_contact(company)
+        and is_placeholder_contact(email)
+        and (not has_phone or is_placeholder_contact(phone))
     )
 
 
@@ -143,7 +143,7 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
         if col in AUDIT_COLS + AUDIT_EXTRA_COLS:
             continue
         phone_field = str(col).strip().lower() in PHONE_COLS
-        df[col] = df[col].map(lambda v, phone_field=phone_field: _strip_formula(v, phone_field=phone_field))
+        df[col] = df[col].map(lambda v, phone_field=phone_field: strip_formula(v, phone_field=phone_field))
 
     has_phone = "Phone" in df.columns
     has_website = "Website" in df.columns
@@ -161,13 +161,13 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
         website = cell(df.at[idx, "Website"]) if has_website else ""
 
         if is_test_record(first, last, company, email):
-            flags = _add_flag(flags, "test_data")
+            flags = add_flag(flags, "test_data")
             hitl = True
             issue_count += 1
 
         # Drop later in process_csv: Company + Email + Phone all missing/placeholder.
         if is_junk_lead_values(company, email, phone, has_phone=has_phone):
-            flags = _add_flag(flags, "junk_lead")
+            flags = add_flag(flags, "junk_lead")
             hitl = True
             issue_count += 1
 
@@ -177,7 +177,7 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
             if field in df.columns and not cell(df.at[idx, field])
         ]
         if missing_profile:
-            flags = _add_flag(flags, "incomplete_profile")
+            flags = add_flag(flags, "incomplete_profile")
             df.at[idx, "completeness_flag"] = "missing:" + "|".join(missing_profile)
             issue_count += 1
 
@@ -187,24 +187,24 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
                 df.at[idx, "FirstName"] = ""
                 df.at[idx, "LastName"] = ""
                 first = last = ""
-                flags = _add_flag(flags, "placeholder_name")
+                flags = add_flag(flags, "placeholder_name")
                 issue_count += 1
-        if "FirstName" in df.columns and _garbage_name(first):
+        if "FirstName" in df.columns and garbage_name(first):
             df.at[idx, "FirstName"] = ""
             first = ""
-            flags = _add_flag(flags, "garbage_first_name")
+            flags = add_flag(flags, "garbage_first_name")
             issue_count += 1
-        if "LastName" in df.columns and _garbage_name(last):
+        if "LastName" in df.columns and garbage_name(last):
             df.at[idx, "LastName"] = ""
             last = ""
-            flags = _add_flag(flags, "garbage_last_name")
+            flags = add_flag(flags, "garbage_last_name")
             issue_count += 1
 
         if not first:
-            flags = _add_flag(flags, "missing_first_name")
+            flags = add_flag(flags, "missing_first_name")
             issue_count += 1
         if not last:
-            flags = _add_flag(flags, "missing_last_name")
+            flags = add_flag(flags, "missing_last_name")
             issue_count += 1
 
         # Library-backed syntax + real MX deliverability. An undeliverable
@@ -219,25 +219,25 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
             email = checked["value"]
             email_ok = bool(email)
             if checked["status"] == INVALID_SYNTAX:
-                flags = _add_flag(flags, "invalid_email")
+                flags = add_flag(flags, "invalid_email")
                 issue_count += 1
             elif checked["status"] == UNDELIVERABLE:
-                flags = _add_flag(flags, "undeliverable_email")
+                flags = add_flag(flags, "undeliverable_email")
                 hitl = True
                 issue_count += 1
             elif checked["status"] == UNKNOWN:
-                flags = _add_flag(flags, "email_deliverability_unknown")
+                flags = add_flag(flags, "email_deliverability_unknown")
                 hitl = True
                 issue_count += 1
         if not email:
-            flags = _add_flag(flags, "missing_email")
+            flags = add_flag(flags, "missing_email")
             hitl = True
             issue_count += 1
 
         if has_phone and phone:
             digit_len = len(digits_only(phone))
             if 0 < digit_len < 7:
-                flags = _add_flag(flags, "needs_country_code_review")
+                flags = add_flag(flags, "needs_country_code_review")
                 hitl = True
                 issue_count += 1
         if has_phone and phone and is_junk_phone(phone):
@@ -245,15 +245,15 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
             df.at[idx, "Phone_raw"] = phone
             df.at[idx, "Phone"] = ""
             phone = ""
-            flags = _add_flag(flags, "garbage_phone")
+            flags = add_flag(flags, "garbage_phone")
             issue_count += 1
         if has_phone and not phone:
-            flags = _add_flag(flags, "missing_phone")
+            flags = add_flag(flags, "missing_phone")
             hitl = True
             issue_count += 1
 
         if not email_ok and not phone:
-            flags = _add_flag(flags, "missing_hard_required")
+            flags = add_flag(flags, "missing_hard_required")
             hitl = True
             issue_count += 1
 
@@ -261,24 +261,24 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
             if is_website_email(website):
                 # Flag only. Normalization may clear the type-mismatch; do not
                 # drop the lead, and do not hide the error by silent-clearing first.
-                flags = _add_flag(flags, "website_is_email")
+                flags = add_flag(flags, "website_is_email")
                 hitl = True
                 issue_count += 1
-            host = _website_host(website)
+            host = website_host(website)
             if is_website_email(website):
                 pass
             elif is_personal_domain(host):
                 df.at[idx, "Website"] = ""
-                flags = _add_flag(flags, "personal_website")
+                flags = add_flag(flags, "personal_website")
                 hitl = True
                 issue_count += 1
             elif is_placeholder_domain(host) or not is_plausible_domain(host):
                 df.at[idx, "Website"] = ""
-                flags = _add_flag(flags, "invalid_website")
+                flags = add_flag(flags, "invalid_website")
                 hitl = True
                 issue_count += 1
             elif host and company and not domain_matches_company(host, company):
-                flags = _add_flag(flags, "website_company_mismatch")
+                flags = add_flag(flags, "website_company_mismatch")
                 hitl = True
                 issue_count += 1
 
@@ -290,7 +290,7 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
                 and not is_placeholder_domain(host)
                 and not domain_matches_company(host, company)
             ):
-                flags = _add_flag(flags, "company_email_mismatch")
+                flags = add_flag(flags, "company_email_mismatch")
                 hitl = True
                 issue_count += 1
 

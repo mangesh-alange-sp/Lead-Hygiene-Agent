@@ -34,7 +34,7 @@ Allowlists live in `data/pipeline_config.json`, so adding an acronym or calling
 code extends test coverage automatically.
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -t .
+pytest -vv
 ```
 
 Rules currently pinned:

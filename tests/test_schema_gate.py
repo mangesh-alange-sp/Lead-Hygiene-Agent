@@ -15,7 +15,7 @@ from pipeline.tools import process_csv
 COLUMNS = ["Id", "Email", "Phone", "Website"]
 
 
-def _frame(**overrides):
+def make_frame(**overrides):
     data = {
         "Id": ["00Q1", "00Q2"],
         "Email": ["a@acme.com", "b@acme.com"],
@@ -28,67 +28,67 @@ def _frame(**overrides):
 
 class CleanFrameTests(unittest.TestCase):
     def test_clean_frame_passes(self):
-        self.assertEqual(check_output_schema(_frame(), COLUMNS), [])
-        assert_output_schema(_frame(), COLUMNS)
+        self.assertEqual(check_output_schema(make_frame(), COLUMNS), [])
+        assert_output_schema(make_frame(), COLUMNS)
 
 
 class HeaderTests(unittest.TestCase):
     def test_missing_column_fails(self):
-        frame = _frame().drop(columns=["Website"])
+        frame = make_frame().drop(columns=["Website"])
         self.assertTrue(check_output_schema(frame, COLUMNS))
 
     def test_extra_column_fails(self):
-        frame = _frame()
+        frame = make_frame()
         frame["Sneaky"] = "x"
         self.assertTrue(check_output_schema(frame, COLUMNS))
 
     def test_reordered_columns_fail(self):
-        frame = _frame()[["Email", "Id", "Phone", "Website"]]
+        frame = make_frame()[["Email", "Id", "Phone", "Website"]]
         self.assertTrue(check_output_schema(frame, COLUMNS))
 
     def test_double_quoted_header_is_caught(self):
-        frame = _frame().rename(columns={"Id": '"Id""'})
+        frame = make_frame().rename(columns={"Id": '"Id""'})
         violations = check_output_schema(frame, COLUMNS)
         self.assertTrue(any("headers" in v for v in violations))
 
 
 class IdTests(unittest.TestCase):
     def test_duplicate_ids_fail(self):
-        violations = check_output_schema(_frame(Id=["00Q1", "00Q1"]), COLUMNS)
+        violations = check_output_schema(make_frame(Id=["00Q1", "00Q1"]), COLUMNS)
         self.assertTrue(violations)
 
     def test_blank_id_fails(self):
-        violations = check_output_schema(_frame(Id=["00Q1", ""]), COLUMNS)
+        violations = check_output_schema(make_frame(Id=["00Q1", ""]), COLUMNS)
         self.assertTrue(violations)
 
 
 class WebsiteTests(unittest.TestCase):
     def test_non_url_website_fails(self):
         violations = check_output_schema(
-            _frame(Website=["acme.com", ""]), COLUMNS
+            make_frame(Website=["acme.com", ""]), COLUMNS
         )
         self.assertTrue(violations)
 
     def test_blank_website_is_allowed(self):
-        self.assertEqual(check_output_schema(_frame(Website=["", ""]), COLUMNS), [])
+        self.assertEqual(check_output_schema(make_frame(Website=["", ""]), COLUMNS), [])
 
 
 class PhoneStateTests(unittest.TestCase):
     def test_country_code_less_phone_fails_without_the_review_flag(self):
-        frame = _frame(Phone=["2065550100", "+447771695127"])
+        frame = make_frame(Phone=["2065550100", "+447771695127"])
         frame["phone_status"] = ["valid", "valid"]
         violations = check_phone_states(frame)
         self.assertTrue(violations)
         self.assertIn("00Q1", violations[0])
 
     def test_country_code_less_phone_passes_when_flagged_needs_review(self):
-        frame = _frame(Phone=["2065550100", "+447771695127"])
+        frame = make_frame(Phone=["2065550100", "+447771695127"])
         frame["phone_status"] = ["needs_review", "valid"]
         self.assertEqual(check_phone_states(frame), [])
 
     def test_gate_raises_on_violation(self):
         with self.assertRaises(OutputSchemaViolation):
-            assert_output_schema(_frame(Id=["00Q1", "00Q1"]), COLUMNS)
+            assert_output_schema(make_frame(Id=["00Q1", "00Q1"]), COLUMNS)
 
 
 class PipelineGateTests(unittest.TestCase):

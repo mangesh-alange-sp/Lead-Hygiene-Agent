@@ -1,6 +1,7 @@
 google-adk
 google-genai
 pandas
+pytest
 
 # Validation/normalization is library-backed, not regex-based:
 phonenumbers      # libphonenumber: phone validity + E.164 formatting

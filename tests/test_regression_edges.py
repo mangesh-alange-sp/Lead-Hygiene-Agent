@@ -10,7 +10,7 @@ from pipeline.phone import parse_phone
 from pipeline.tools import process_csv
 
 
-def _record(lead_id, first, last, email, phone, company):
+def record(lead_id, first, last, email, phone, company):
     return {
         "Id": lead_id, "FirstName": first, "LastName": last,
         "Email": email, "Phone": phone, "Company": company,
@@ -70,8 +70,8 @@ class SwitchboardGroupTests(unittest.TestCase):
         for company, phone, email_a, email_b in groups:
             with self.subTest(company=company):
                 result = score_pair(
-                    _record("A", "Jane", "Doe", email_a, phone, company),
-                    _record("B", "Mark", "Lopez", email_b, phone, company),
+                    record("A", "Jane", "Doe", email_a, phone, company),
+                    record("B", "Mark", "Lopez", email_b, phone, company),
                 )
                 self.assertIn("switchboard_phone", result["signals"])
                 self.assertFalse(result["auto_merge"])
@@ -82,8 +82,8 @@ class SyntheticDupePairTests(unittest.TestCase):
         records = []
         for i in range(1, 12):
             email = f"user{i:02d}@acme.com"
-            records.append(_record(f"DUPEA{i:03d}", "Pat", f"Lee{i}", email, "4155550100", "Acme"))
-            records.append(_record(f"DUPEB{i:03d}", "Pat", f"Lee{i}", email, "4155550100", "Acme Corp"))
+            records.append(record(f"DUPEA{i:03d}", "Pat", f"Lee{i}", email, "4155550100", "Acme"))
+            records.append(record(f"DUPEB{i:03d}", "Pat", f"Lee{i}", email, "4155550100", "Acme Corp"))
         survivors, merge_log = dedupe_leads(records)
         self.assertEqual(len(survivors), 11)
         absorbed = []
@@ -143,7 +143,7 @@ class RegressionDiffTests(unittest.TestCase):
 
         from pipeline.tools import run_dedup_pipeline
 
-        class _Ctx:
+        class Ctx:
             def __init__(self):
                 self.state = {}
                 self.saved = []
@@ -156,7 +156,7 @@ class RegressionDiffTests(unittest.TestCase):
         # A title change survives normalization, so it reaches the diff gate.
         tampered = golden.replace(",PM,", ",Director,", 1)
         self.assertNotEqual(tampered, golden)
-        ctx = _Ctx()
+        ctx = Ctx()
         out = asyncio.run(run_dedup_pipeline(tampered, ctx))
         self.assertEqual(out["status"], "error")
         self.assertTrue(out["field_diffs"])

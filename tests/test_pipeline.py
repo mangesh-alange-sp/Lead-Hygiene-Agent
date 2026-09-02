@@ -21,7 +21,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 INPUT_CSV = FIXTURES / "lead_data_with_duplicates.csv"
 
 
-def _load_result():
+def load_result():
     result = process_csv(INPUT_CSV.read_text(encoding="utf-8"))
     assert result["status"] == "ok", result.get("message")
     return result, pd.read_csv(io.StringIO(result["csv"]), dtype=str).fillna("")
@@ -30,11 +30,11 @@ def _load_result():
 class SchemaTests(unittest.TestCase):
     def test_output_columns_match_the_source_exactly(self):
         source = pd.read_csv(INPUT_CSV, dtype=str)
-        _, out = _load_result()
+        _, out = load_result()
         self.assertEqual(list(out.columns), list(source.columns))
 
     def test_no_audit_columns_leak_into_the_output(self):
-        result, out = _load_result()
+        result, out = load_result()
         internal = {
             "merged_from_ids", "match_signals_used", "confidence_score",
             "data_quality_flags", "hitl_review", "decision",
@@ -43,7 +43,7 @@ class SchemaTests(unittest.TestCase):
         self.assertNotIn("merged_from_ids", result["csv"].splitlines()[0])
 
     def test_audit_information_goes_to_the_side_file(self):
-        result, _ = _load_result()
+        result, _ = load_result()
         audit = list(csv.DictReader(io.StringIO(result["audit_csv"])))
         self.assertTrue(audit)
         self.assertIn("merged_from_ids", audit[0])
@@ -52,7 +52,7 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(result["audit_file"], "dedup_log.csv")
 
     def test_csv_export_hygiene(self):
-        result, _ = _load_result()
+        result, _ = load_result()
         raw = result["csv"]
         self.assertFalse(raw.startswith("\ufeff"))
         header = raw.splitlines()[0]
@@ -68,14 +68,14 @@ class SchemaTests(unittest.TestCase):
 
 class BatchInvariantTests(unittest.TestCase):
     def test_written_batch_satisfies_every_invariant(self):
-        result, out = _load_result()
+        result, out = load_result()
         self.assertEqual(
             check_records(out.to_dict("records"), rows_in=result["leads_in"]), []
         )
         self.assertEqual(result["invariant_violations"], [])
 
     def test_row_count_never_grows(self):
-        result, _ = _load_result()
+        result, _ = load_result()
         self.assertLessEqual(result["leads_out"], result["leads_in"])
         self.assertEqual(
             result["leads_in"] - result["leads_out"],
@@ -83,7 +83,7 @@ class BatchInvariantTests(unittest.TestCase):
         )
 
     def test_no_phone_carries_an_excel_marker(self):
-        result, _ = _load_result()
+        result, _ = load_result()
         for row in csv.DictReader(io.StringIO(result["csv"])):
             phone = row.get("Phone") or ""
             self.assertFalse(phone.startswith("'"), row.get("Id"))
@@ -102,7 +102,7 @@ class BatchInvariantTests(unittest.TestCase):
         self.assertNotIn("csv", result)
 
     def test_pipeline_is_idempotent(self):
-        result, _ = _load_result()
+        result, _ = load_result()
         second = process_csv(result["csv"])
         self.assertEqual(second["status"], "ok", second.get("message"))
         self.assertEqual(second["csv"], result["csv"])
@@ -113,7 +113,7 @@ class TrickyRowTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.result, out = _load_result()
+        cls.result, out = load_result()
         cls.rows = out.set_index("Id")
 
     def phone(self, lead_id):
@@ -321,7 +321,7 @@ class GuardrailTests(unittest.TestCase):
 
 class RunSummaryTests(unittest.TestCase):
     def test_process_csv_returns_a_complete_summary(self):
-        result, _ = _load_result()
+        result, _ = load_result()
         summary = result["summary"]
         self.assertEqual(summary["totals"]["leads_in"], result["leads_in"])
         self.assertEqual(summary["totals"]["leads_out"], result["leads_out"])
@@ -361,7 +361,7 @@ class RunSummaryTests(unittest.TestCase):
         self.assertEqual(summary["totals"]["records_dropped"], 1)
         self.assertEqual(summary["dropped"][0]["id"], "00Q3")
         self.assertTrue(any(merge["survivor_id"] in {"00Q1", "00Q2"} for merge in summary["merges"]))
-        from pipeline.tools import _agent_facing_summary, format_run_summary
+        from pipeline.tools import agent_facing_summary, format_run_summary
 
         self.assertTrue(any("Manaster" in line and "signals:" in line for line in summary["merge_lines"]))
         self.assertIn("Manaster", format_run_summary(summary))
@@ -371,7 +371,7 @@ class RunSummaryTests(unittest.TestCase):
         self.assertIn("Director", title_examples)
         self.assertTrue(any("unformatted_phone" in row["flags"] for row in summary["hitl"]))
         text = format_run_summary(summary)
-        facing = _agent_facing_summary(summary)
+        facing = agent_facing_summary(summary)
         self.assertEqual(facing["merge_lines"], summary["merge_lines"])
         self.assertNotIn("directory", facing)
         self.assertIn("00Q3", " ".join(summary["critical_lines"]))
@@ -405,7 +405,7 @@ class GoldenRegressionTests(unittest.TestCase):
         from pipeline.regression import diff_against_golden
 
         golden = pd.read_csv(FIXTURES / "golden_deduped.csv", dtype=str).fillna("")
-        result, out = _load_result()
+        result, out = load_result()
         self.assertEqual(list(out["Id"]), list(golden["Id"]))
         self.assertEqual(result["duplicates_merged"], 3)
         self.assertEqual(result["records_dropped"], 2)
@@ -413,7 +413,7 @@ class GoldenRegressionTests(unittest.TestCase):
         self.assertEqual(result.get("field_diffs"), [])
 
     def test_accented_names_are_not_ascii_folded(self):
-        _, out = _load_result()
+        _, out = load_result()
         rows = out.set_index("Id")
         self.assertEqual(rows.loc["00Q003", "LastName"], "Büchert")
         self.assertEqual(rows.loc["00Q012", "FirstName"], "Stéphane")
@@ -431,7 +431,7 @@ class GoldenRegressionTests(unittest.TestCase):
         self.assertTrue(row["Phone"].startswith("+49"))
 
     def test_shared_switchboard_groups_stay_separate(self):
-        _, out = _load_result()
+        _, out = load_result()
         self.assertIn("00Q004", set(out["Id"]))
         self.assertIn("00Q005", set(out["Id"]))
 
@@ -440,7 +440,7 @@ class ExportSchemaTests(unittest.TestCase):
     def test_exported_headers_round_trip(self):
         from pipeline.invariants import check_exported_schema
 
-        result, _ = _load_result()
+        result, _ = load_result()
         source = pd.read_csv(INPUT_CSV, dtype=str)
         self.assertEqual(check_exported_schema(result["csv"], list(source.columns)), [])
 

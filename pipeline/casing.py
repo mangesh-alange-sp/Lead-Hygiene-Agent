@@ -19,26 +19,26 @@ from .textnorm import cell, collapse_whitespace
 LEGAL_SUFFIX_RE = re.compile(r"\b(" + "|".join(LEGAL_SUFFIX_MATCH_TOKENS) + r")\.?\b", re.I)
 
 
-def _key(token: str) -> str:
+def token_key(token: str) -> str:
     return re.sub(r"\s+", " ", token.strip().lower())
 
 
-def _build_display_map() -> dict:
+def build_display_map() -> dict:
     """Lookup keyed by lowercase form and by dot-stripped lowercase form."""
     display = {}
     for group in (COMPANY_ACRONYMS, COMPANY_MIXED_CASE):
         for form in group:
-            key = _key(form)
-            display.setdefault(key, form)
-            display.setdefault(key.replace(".", ""), form)
-            display.setdefault(key.replace("&", " and "), form)
-    for key, form in LEGAL_SUFFIX_DISPLAY.items():
-        display.setdefault(_key(key), form)
-        display.setdefault(_key(key).replace(".", ""), form)
+            folded = token_key(form)
+            display.setdefault(folded, form)
+            display.setdefault(folded.replace(".", ""), form)
+            display.setdefault(folded.replace("&", " and "), form)
+    for lookup, form in LEGAL_SUFFIX_DISPLAY.items():
+        display.setdefault(token_key(lookup), form)
+        display.setdefault(token_key(lookup).replace(".", ""), form)
     return display
 
 
-DISPLAY_MAP = _build_display_map()
+DISPLAY_MAP = build_display_map()
 SMALL_WORDS = frozenset({"of", "the", "and", "for", "to", "in", "at", "by", "de", "von", "van"})
 
 
@@ -70,8 +70,8 @@ def case_company_token(token: str) -> str:
     if not bare:
         return token
 
-    key = _key(bare)
-    for candidate in (key, key.replace(".", ""), key.replace("&", " and ")):
+    folded = token_key(bare)
+    for candidate in (folded, folded.replace(".", ""), folded.replace("&", " and ")):
         if candidate in DISPLAY_MAP:
             display = DISPLAY_MAP[candidate]
             # A display form that already ends in '.' absorbs a trailing period.

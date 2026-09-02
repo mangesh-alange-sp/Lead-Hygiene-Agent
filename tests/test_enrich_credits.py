@@ -18,12 +18,12 @@ COLUMNS = [
 ]
 
 
-def _frame(rows):
+def frame(rows):
     return pd.DataFrame(rows, columns=COLUMNS).fillna("")
 
 
 class RecordingApi:
-    """Stands in for _lusha_post and records every payload sent."""
+    """Stands in for lusha_post and records every payload sent."""
 
     def __init__(self):
         self.calls = []
@@ -63,14 +63,14 @@ class RecordingApi:
 class RevealScope(unittest.TestCase):
     def setUp(self):
         self.api = RecordingApi()
-        self._real_post = enrich._lusha_post
-        enrich._lusha_post = self.api
+        self.real_post = enrich.lusha_post
+        enrich.lusha_post = self.api
 
     def tearDown(self):
-        enrich._lusha_post = self._real_post
+        enrich.lusha_post = self.real_post
 
     def test_phones_are_never_revealed_for_a_row_that_has_a_phone(self):
-        df = _frame(
+        df = frame(
             [
                 ["1", "Pat", "Smith", "", "+14155550100", "Acme Corp", "https://acme.com", "Tech", "1000000", "50"],
                 ["2", "Alex", "Ng", "alex@acme.com", "", "Acme Corp", "https://acme.com", "Tech", "1000000", "50"],
@@ -88,7 +88,7 @@ class RevealScope(unittest.TestCase):
                         self.assertEqual(df.at[idx, "Email"], "")
 
     def test_each_request_carries_an_explicit_reveal_list(self):
-        df = _frame(
+        df = frame(
             [["1", "Pat", "Smith", "", "", "Acme Corp", "https://acme.com", "Tech", "1000000", "50"]]
         )
         enrich.enrich_dataframe(df)
@@ -97,7 +97,7 @@ class RevealScope(unittest.TestCase):
             self.assertIn("reveal", payload)
 
     def test_a_row_missing_only_profile_fields_reveals_nothing(self):
-        df = _frame(
+        df = frame(
             [["1", "", "Smith", "pat@acme.com", "+14155550100", "Acme Corp", "https://acme.com", "Tech", "1000000", "50"]]
         )
         enrich.enrich_dataframe(df)
@@ -105,7 +105,7 @@ class RevealScope(unittest.TestCase):
         self.assertEqual([p["reveal"] for p in self.api.contact_payloads()], [[]])
 
     def test_a_complete_row_is_never_sent(self):
-        df = _frame(
+        df = frame(
             [["1", "Pat", "Smith", "pat@acme.com", "+14155550100", "Acme", "https://acme.com", "Tech", "1000000", "50"]]
         )
         _, stats = enrich.enrich_dataframe(df)
@@ -118,14 +118,14 @@ class RevealScope(unittest.TestCase):
 class CompanyReuse(unittest.TestCase):
     def setUp(self):
         self.api = RecordingApi()
-        self._real_post = enrich._lusha_post
-        enrich._lusha_post = self.api
+        self.real_post = enrich.lusha_post
+        enrich.lusha_post = self.api
 
     def tearDown(self):
-        enrich._lusha_post = self._real_post
+        enrich.lusha_post = self.real_post
 
     def test_one_company_lookup_serves_every_row_on_that_domain(self):
-        df = _frame(
+        df = frame(
             [
                 ["1", "Terry", "Ng", "terry.ng@globalcorp.com", "+447911123456", "CEA", "", "Tech", "", ""],
                 ["2", "Manuel", "Costa", "manuel.costa@globalcorp.com", "+33612345678", "Globalcorp", "", "Tech", "", ""],
@@ -141,7 +141,7 @@ class CompanyReuse(unittest.TestCase):
         self.assertEqual(list(df["AnnualRevenue"]), ["10000000", "10000000"])
 
     def test_a_missing_website_does_not_trigger_a_contact_call(self):
-        df = _frame(
+        df = frame(
             [["1", "Anja", "Visser", "anja.visser@asml.com", "+31402683000", "ASML", "", "Manufacturing", "", ""]]
         )
         enrich.enrich_dataframe(df)
@@ -151,7 +151,7 @@ class CompanyReuse(unittest.TestCase):
 
 
     def test_blank_employees_and_revenue_trigger_a_company_lookup(self):
-        df = _frame(
+        df = frame(
             [["1", "Pat", "Smith", "pat@acme.com", "+14155550100", "Acme", "https://acme.com", "Tech", "", ""]]
         )
         df, _ = enrich.enrich_dataframe(df)

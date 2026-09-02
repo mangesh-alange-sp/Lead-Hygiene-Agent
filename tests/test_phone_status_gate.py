@@ -147,16 +147,16 @@ class PhoneStatusColumnTests(unittest.TestCase):
 
 
 class PhoneStateGateTests(unittest.TestCase):
-    def _frame(self, phone, status):
+    def frame(self, phone, status):
         return pd.DataFrame({"Id": ["00Q1"], "Phone": [phone], "phone_status": [status]})
 
     def test_missing_status_is_a_violation(self):
-        violations = check_phone_states(self._frame("+12065550100", ""))
+        violations = check_phone_states(self.frame("+12065550100", ""))
         self.assertTrue(violations)
         self.assertIn("no phone_status", violations[0])
 
     def test_valid_status_on_a_non_e164_value_is_a_violation(self):
-        violations = check_phone_states(self._frame("2065550100", STATUS_VALID))
+        violations = check_phone_states(self.frame("2065550100", STATUS_VALID))
         self.assertTrue(violations)
         self.assertIn("not E.164", violations[0])
 
@@ -193,9 +193,9 @@ class PhoneStateGateTests(unittest.TestCase):
         self.assertEqual(row["Phone"], "+49172459728")
 
     def test_the_two_legal_states_pass(self):
-        self.assertEqual(check_phone_states(self._frame("+12065550100", STATUS_VALID)), [])
+        self.assertEqual(check_phone_states(self.frame("+12065550100", STATUS_VALID)), [])
         self.assertEqual(
-            check_phone_states(self._frame("2065550100", STATUS_NEEDS_REVIEW)), []
+            check_phone_states(self.frame("2065550100", STATUS_NEEDS_REVIEW)), []
         )
 
 
@@ -211,7 +211,7 @@ class ExcelRenderingTests(unittest.TestCase):
         cls.result = process_csv(FIXTURE.read_text(encoding="utf-8"))
         assert cls.result["status"] == "ok", cls.result.get("message")
 
-    def _phones(self, key):
+    def phones(self, key):
         return [
             row["Phone"]
             for row in csv.DictReader(io.StringIO(self.result[key]))
@@ -219,7 +219,7 @@ class ExcelRenderingTests(unittest.TestCase):
         ]
 
     def test_the_salesforce_writeback_keeps_bare_e164(self):
-        phones = self._phones("csv")
+        phones = self.phones("csv")
         self.assertTrue(phones)
         for phone in phones:
             with self.subTest(phone=phone):
@@ -227,7 +227,7 @@ class ExcelRenderingTests(unittest.TestCase):
                 self.assertNotIn('="', phone)
 
     def test_the_review_copy_guards_every_plus_prefixed_value(self):
-        for phone in self._phones("excel_csv"):
+        for phone in self.phones("excel_csv"):
             with self.subTest(phone=phone):
                 if phone.startswith('="'):
                     self.assertRegex(phone, r'^="\+\d{6,15}"$')
@@ -239,7 +239,7 @@ class ExcelRenderingTests(unittest.TestCase):
             return value[2:-1] if value.startswith('="') else value
 
         self.assertEqual(
-            self._phones("csv"), [unwrap(v) for v in self._phones("excel_csv")]
+            self.phones("csv"), [unwrap(v) for v in self.phones("excel_csv")]
         )
 
     def test_the_review_copy_is_bom_prefixed_and_the_writeback_is_not(self):
@@ -269,12 +269,12 @@ class ExcelRenderingTests(unittest.TestCase):
                     self.assertFalse(str(value).startswith('="'), value)
 
     def test_the_guard_only_fires_on_formula_leading_characters(self):
-        from pipeline.tools import _excel_text_guard
+        from pipeline.tools import excel_text_guard
 
-        self.assertEqual(_excel_text_guard("+12065550100"), '="+12065550100"')
-        self.assertEqual(_excel_text_guard("2065550100"), "2065550100")
-        self.assertEqual(_excel_text_guard(""), "")
-        self.assertEqual(_excel_text_guard("(206) 555-0100"), "(206) 555-0100")
+        self.assertEqual(excel_text_guard("+12065550100"), '="+12065550100"')
+        self.assertEqual(excel_text_guard("2065550100"), "2065550100")
+        self.assertEqual(excel_text_guard(""), "")
+        self.assertEqual(excel_text_guard("(206) 555-0100"), "(206) 555-0100")
 
 
 class RegressionGateWiringTests(unittest.TestCase):

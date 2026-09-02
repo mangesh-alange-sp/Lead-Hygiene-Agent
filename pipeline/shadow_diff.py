@@ -19,17 +19,17 @@ from pathlib import Path
 import pandas as pd
 
 
-def _read(path) -> pd.DataFrame:
+def read(path) -> pd.DataFrame:
     return pd.read_csv(path, dtype=str, keep_default_na=False).fillna("")
 
 
-def _index(df: pd.DataFrame, key: str) -> dict:
+def index(df: pd.DataFrame, key: str) -> dict:
     return {str(row.get(key, "")): row for row in df.to_dict("records")}
 
 
 def diff_frames(old: pd.DataFrame, new: pd.DataFrame, key: str = "Id") -> dict:
     """Cell-level diff keyed by lead Id, plus row-level appearances/disappearances."""
-    old_rows, new_rows = _index(old, key), _index(new, key)
+    old_rows, new_rows = index(old, key), index(new, key)
     columns = [col for col in old.columns if col in new.columns]
     changes = []
     for lead_id, old_row in old_rows.items():
@@ -82,7 +82,7 @@ def format_report(report: dict, expected_columns) -> str:
     return "\n".join(lines)
 
 
-def _run_pipeline(input_csv: Path) -> pd.DataFrame:
+def run_pipeline(input_csv: Path) -> pd.DataFrame:
     from .tools import process_csv
 
     result = process_csv(input_csv.read_text(encoding="utf-8"))
@@ -90,7 +90,7 @@ def _run_pipeline(input_csv: Path) -> pd.DataFrame:
         raise SystemExit(f"pipeline failed: {result.get('message')}")
     import io
 
-    return _read(io.StringIO(result["csv"]))
+    return read(io.StringIO(result["csv"]))
 
 
 def main(argv=None) -> int:
@@ -113,11 +113,11 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "capture":
-        _run_pipeline(args.input_csv).to_csv(args.out, index=False, lineterminator="\n")
+        run_pipeline(args.input_csv).to_csv(args.out, index=False, lineterminator="\n")
         print(f"baseline written to {args.out}")
         return 0
 
-    report = diff_frames(_read(args.baseline_csv), _run_pipeline(args.input_csv), key=args.key)
+    report = diff_frames(read(args.baseline_csv), run_pipeline(args.input_csv), key=args.key)
     print(format_report(report, args.expect))
     unexpected = unexpected_changes(report, args.expect)
     schema_drift = report["added_columns"] or report["dropped_columns"]

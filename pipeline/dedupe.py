@@ -39,16 +39,16 @@ def normalized_email(value) -> str:
     return cell(value).lower()
 
 
-def _canonical_first(folded: str) -> str:
+def canonical_first(folded: str) -> str:
     token = (folded or "").split()[0] if folded else ""
     return FIRST_NAME_ALIASES.get(token, token)
 
 
-def _first_compatible(a: str, b: str) -> bool:
+def first_compatible(a: str, b: str) -> bool:
     """Alias or initial match only. Character-ratio similarity is not identity."""
     if not a or not b:
         return False
-    if _canonical_first(a) and _canonical_first(a) == _canonical_first(b):
+    if canonical_first(a) and canonical_first(a) == canonical_first(b):
         return True
     a0, b0 = a.split()[0], b.split()[0]
     if len(a0) == 1 and b0.startswith(a0):
@@ -58,7 +58,7 @@ def _first_compatible(a: str, b: str) -> bool:
     return False
 
 
-def _placeholder_person(first_folded: str, last_folded: str) -> bool:
+def placeholder_person(first_folded: str, last_folded: str) -> bool:
     first = (first_folded or "").split()[0] if first_folded else ""
     last = (last_folded or "").split()[0] if last_folded else ""
     if first in TEST_GIVEN_NAMES or last in TEST_SURNAMES:
@@ -66,7 +66,7 @@ def _placeholder_person(first_folded: str, last_folded: str) -> bool:
     return (first, last) in DUMMY_FULL_NAMES
 
 
-def _phones_near(p1: str, p2: str) -> bool:
+def phones_near(p1: str, p2: str) -> bool:
     """True when two numbers differ by 1–2 digits. Never an auto-merge by itself."""
     if not p1 or not p2 or p1 == p2:
         return False
@@ -75,20 +75,20 @@ def _phones_near(p1: str, p2: str) -> bool:
     return 1 <= Levenshtein.distance(p1, p2) <= 2
 
 
-def _names_identity(row1, row2) -> bool:
+def names_identity(row1, row2) -> bool:
     """True only when both rows name the same real person (not junk/test tokens)."""
     fn1, fn2 = fold_text(row1.get("FirstName", "")), fold_text(row2.get("FirstName", ""))
     ln1, ln2 = fold_text(row1.get("LastName", "")), fold_text(row2.get("LastName", ""))
     if not (fn1 and fn2 and ln1 and ln2):
         return False
-    if _placeholder_person(fn1, ln1) or _placeholder_person(fn2, ln2):
+    if placeholder_person(fn1, ln1) or placeholder_person(fn2, ln2):
         return False
     if ln1 != ln2:
         return False
-    return _first_compatible(fn1, fn2)
+    return first_compatible(fn1, fn2)
 
 
-def _add_flag(current, flag: str) -> str:
+def add_flag(current, flag: str) -> str:
     flags = [part for part in cell(current).split("|") if part]
     if flag not in flags:
         flags.append(flag)
@@ -112,7 +112,7 @@ def match_reason(signals, score=0, decision="") -> str:
     """Human-readable why a pair merged or was held. Does not change the decision."""
     parts = [SIGNAL_REASONS.get(signal, signal) for signal in (signals or [])]
     why = " + ".join(parts) if parts else "no identity signal"
-    label = _confidence_label(score)
+    label = confidence_label(score)
     prefix = f"{label}: " if label else ""
     if decision == "hitl_review":
         return f"{prefix}held for review ({why})"
@@ -121,7 +121,7 @@ def match_reason(signals, score=0, decision="") -> str:
     return f"{prefix}{why}"
 
 
-def _confidence_label(score: int) -> str:
+def confidence_label(score: int) -> str:
     if score >= HIGH_MIN:
         return "High"
     if score >= AUTO_MERGE_MIN:
@@ -142,7 +142,7 @@ def score_pair(row1, row2) -> dict:
         signals.append("exact_email")
         score = max(score, 100)
 
-    names_ok = _names_identity(row1, row2)
+    names_ok = names_identity(row1, row2)
     fn1 = fold_text(row1.get("FirstName", ""))
     fn2 = fold_text(row2.get("FirstName", ""))
 
@@ -159,9 +159,9 @@ def score_pair(row1, row2) -> dict:
 
     if names_ok and same_company:
         signals.append("name+company")
-        score = max(score, 80 if _canonical_first(fn1) == _canonical_first(fn2) else 70)
+        score = max(score, 80 if canonical_first(fn1) == canonical_first(fn2) else 70)
 
-    phone_near = _phones_near(p1, p2)
+    phone_near = phones_near(p1, p2)
 
     if names_ok and same_phone:
         signals.append("name+phone")
@@ -192,7 +192,7 @@ def score_pair(row1, row2) -> dict:
         signals.append("weak_company")
 
     unique = list(dict.fromkeys(signals))
-    both_test = _is_test_row(row1) and _is_test_row(row2)
+    both_test = is_test_row(row1) and is_test_row(row2)
     # Same company switchboard: shared phone is never identity.
     if "switchboard_phone" in unique:
         auto_merge = False
@@ -217,17 +217,17 @@ def score_pair(row1, row2) -> dict:
     }
 
 
-def _populated_count(record) -> int:
+def populated_count(record) -> int:
     return sum(1 for key, value in record.items() if key not in INTERNAL_FIELDS and cell(value))
 
 
-def _is_test_row(record) -> bool:
+def is_test_row(record) -> bool:
     return "test_data" in cell(record.get("data_quality_flags", "")).split("|")
 
 
 def select_winner(row1, row2) -> tuple:
     """Prefer a real Salesforce Id over a synthetic one, then the fuller record."""
-    t1, t2 = _is_test_row(row1), _is_test_row(row2)
+    t1, t2 = is_test_row(row1), is_test_row(row2)
     if t1 and not t2:
         return row2, row1
     if t2 and not t1:
@@ -237,12 +237,12 @@ def select_winner(row1, row2) -> tuple:
         return row1, row2
     if id2.startswith("00Q") and id1.startswith("DUPE"):
         return row2, row1
-    if _populated_count(row1) >= _populated_count(row2):
+    if populated_count(row1) >= populated_count(row2):
         return row1, row2
     return row2, row1
 
 
-def _better_person_name(kept: str, other: str, *, first: bool) -> str:
+def better_person_name(kept: str, other: str, *, first: bool) -> str:
     """Prefer the fuller given name when two values are the same person (Dave/David)."""
     if not other:
         return kept
@@ -250,7 +250,7 @@ def _better_person_name(kept: str, other: str, *, first: bool) -> str:
         return other
     k_fold, o_fold = fold_text(kept), fold_text(other)
     if first:
-        compatible = _first_compatible(k_fold, o_fold)
+        compatible = first_compatible(k_fold, o_fold)
     else:
         compatible = fuzz.ratio(k_fold, o_fold) >= 85
     if compatible and len(other) > len(kept):
@@ -258,7 +258,7 @@ def _better_person_name(kept: str, other: str, *, first: bool) -> str:
     return kept
 
 
-def _better_email(kept: str, other: str) -> str:
+def better_email(kept: str, other: str) -> str:
     """Prefer a corporate address with the more complete local-part."""
     if not other:
         return kept
@@ -295,11 +295,11 @@ def prefer_formal_company(kept: str, other: str) -> str:
     return kept
 
 
-def _better_company(kept: str, other: str) -> str:
+def better_company(kept: str, other: str) -> str:
     return prefer_formal_company(kept, other)
 
 
-def _better_title(kept: str, other: str) -> str:
+def better_title(kept: str, other: str) -> str:
     """Keep the more specific role when one title is a stripped-down version of the other."""
     if not other:
         return kept
@@ -315,7 +315,7 @@ def _better_title(kept: str, other: str) -> str:
     return kept
 
 
-def _has_calling_code(phone: str) -> bool:
+def has_calling_code(phone: str) -> bool:
     """True when the value carries an explicit country code (+CC or (+CC))."""
     return phone.startswith("(+") or phone.startswith("+")
 
@@ -328,18 +328,18 @@ def merge_fields(winner, loser) -> dict:
             continue
         if not cell(merged.get(key)) and cell(value):
             merged[key] = value
-    merged["Email"] = _better_email(cell(merged.get("Email", "")), cell(loser.get("Email", "")))
+    merged["Email"] = better_email(cell(merged.get("Email", "")), cell(loser.get("Email", "")))
     if "FirstName" in merged or "FirstName" in loser:
-        merged["FirstName"] = _better_person_name(
+        merged["FirstName"] = better_person_name(
             cell(merged.get("FirstName", "")), cell(loser.get("FirstName", "")), first=True,
         )
     if "LastName" in merged or "LastName" in loser:
-        merged["LastName"] = _better_person_name(
+        merged["LastName"] = better_person_name(
             cell(merged.get("LastName", "")), cell(loser.get("LastName", "")), first=False,
         )
     if "Company" in merged or "Company" in loser:
         before = cell(merged.get("Company", ""))
-        merged["Company"] = _better_company(before, cell(loser.get("Company", "")))
+        merged["Company"] = better_company(before, cell(loser.get("Company", "")))
         extra = ""
         if cell(merged.get("Company", "")) != before and cell(loser.get("Id", "")):
             extra = (
@@ -354,10 +354,10 @@ def merge_fields(winner, loser) -> dict:
             ) if part
         )
     if "Title" in merged or "Title" in loser:
-        merged["Title"] = _better_title(cell(merged.get("Title", "")), cell(loser.get("Title", "")))
+        merged["Title"] = better_title(cell(merged.get("Title", "")), cell(loser.get("Title", "")))
     w_phone, l_phone = cell(merged.get("Phone", "")), cell(loser.get("Phone", ""))
     if "Phone" in merged or "Phone" in loser:
-        if _has_calling_code(l_phone) and not _has_calling_code(w_phone):
+        if has_calling_code(l_phone) and not has_calling_code(w_phone):
             merged["Phone"] = l_phone
     w_web, l_web = cell(merged.get("Website", "")), cell(loser.get("Website", ""))
     if "Website" in merged or "Website" in loser:
@@ -365,20 +365,20 @@ def merge_fields(winner, loser) -> dict:
             merged["Website"] = l_web
     if "data_quality_flags" in winner or "data_quality_flags" in loser:
         merged["data_quality_flags"] = cell(winner.get("data_quality_flags", ""))
-        winner_is_test = _is_test_row(winner)
+        winner_is_test = is_test_row(winner)
         for part in cell(loser.get("data_quality_flags", "")).split("|"):
             # Absorbing a test row must not taint a real survivor (that would
             # drop the real lead from write-back).
             if part == "test_data" and not winner_is_test:
                 continue
-            merged["data_quality_flags"] = _add_flag(merged["data_quality_flags"], part)
+            merged["data_quality_flags"] = add_flag(merged["data_quality_flags"], part)
     if "hitl_review" in winner or "hitl_review" in loser:
         if cell(winner.get("hitl_review", "")) == "Yes" or cell(loser.get("hitl_review", "")) == "Yes":
             merged["hitl_review"] = "Yes"
     return merged
 
 
-class _MergeTracker:
+class MergeTracker:
     """Accumulates merge provenance per surviving record without touching the record."""
 
     def __init__(self):
@@ -398,14 +398,14 @@ class _MergeTracker:
                 self.survivor_of[lead_id] = survivor_id
         if loser_id:
             self.pair_signals[loser_id] = list(result.get("signals") or [])
-        self._add_signals(survivor_id, result)
+        self.add_signals(survivor_id, result)
         self.decision[survivor_id] = "auto_merge"
 
     def record_hitl(self, lead_id: str, result: dict):
-        self._add_signals(lead_id, result)
+        self.add_signals(lead_id, result)
         self.decision.setdefault(lead_id, "hitl_review")
 
-    def _add_signals(self, lead_id: str, result: dict):
+    def add_signals(self, lead_id: str, result: dict):
         existing = self.signals.setdefault(lead_id, [])
         for signal in result["signals"]:
             if signal not in existing:
@@ -419,7 +419,7 @@ class _MergeTracker:
                 "surviving_lead_id": lead_id,
                 "merged_from_ids": ";".join(self.merged_from.get(lead_id, [])),
                 "match_signals_used": "|".join(self.signals.get(lead_id, [])),
-                "confidence_score": _confidence_label(self.score.get(lead_id, 0)),
+                "confidence_score": confidence_label(self.score.get(lead_id, 0)),
                 "decision": self.decision.get(lead_id, ""),
                 "absorbed_match_signals": ";".join(
                     f"{lid}:{'|'.join(self.pair_signals.get(lid, []))}"
@@ -435,7 +435,7 @@ class _MergeTracker:
         return rows
 
 
-def _collapse_duplicate_emails(survivors: list, tracker: _MergeTracker) -> list:
+def collapse_duplicate_emails(survivors: list, tracker: MergeTracker) -> list:
     """Final safety pass so no two survivors can share a normalized email."""
     position_by_email = {}
     result = []
@@ -468,7 +468,7 @@ def dedupe_leads(records) -> tuple:
     """
     working = [dict(record) for record in records]
     input_ids = {cell(record.get("Id", "")) for record in working}
-    tracker = _MergeTracker()
+    tracker = MergeTracker()
     absorbed_by = {}
     merged_indexes = set()
     survivors = []
@@ -495,13 +495,13 @@ def dedupe_leads(records) -> tuple:
             elif result["hitl"]:
                 for row in (current, candidate):
                     row["hitl_review"] = "Yes"
-                    row["data_quality_flags"] = _add_flag(
+                    row["data_quality_flags"] = add_flag(
                         row.get("data_quality_flags", ""), "low_confidence_match"
                     )
                     tracker.record_hitl(cell(row.get("Id", "")), result)
         survivors.append(current)
 
-    survivors = _collapse_duplicate_emails(survivors, tracker)
+    survivors = collapse_duplicate_emails(survivors, tracker)
 
     assert len(survivors) <= len(working), "dedupe produced more rows than it received"
     unknown = {cell(r.get("Id", "")) for r in survivors} - input_ids

@@ -138,7 +138,7 @@ def infer_region_with_source(email="", country="", phone="", company=""):
     from_country = region_from_country(country)
     if from_country:
         return from_country, "country field"
-    from_digits = region_from_digits(digits_only(_unwrap_bracketed_cc(strip_excel_artifacts(phone))))
+    from_digits = region_from_digits(digits_only(unwrap_bracketed_cc(strip_excel_artifacts(phone))))
     if from_digits:
         return from_digits, "leading calling-code digits"
     from_company = region_from_country(company) if company else ""
@@ -177,7 +177,7 @@ def is_junk_phone(raw_phone) -> bool:
     return False
 
 
-def _unwrap_bracketed_cc(raw: str) -> str:
+def unwrap_bracketed_cc(raw: str) -> str:
     """Accept legacy '(+CC) …' values and turn them back into '+CC …'."""
     return re.sub(r"^\(\+(\d{1,3})\)\s*", r"+\1 ", raw or "").strip()
 
@@ -189,7 +189,7 @@ def is_international_format(value) -> bool:
 
 def input_has_calling_code(raw_phone) -> bool:
     """True for explicit +CC / 00CC. Dummy zeros like 000-000-000 are not a CC."""
-    text = _unwrap_bracketed_cc(strip_excel_artifacts(raw_phone))
+    text = unwrap_bracketed_cc(strip_excel_artifacts(raw_phone))
     if text.startswith("+"):
         return True
     return text.startswith("00") and not text.startswith("000")
@@ -199,7 +199,7 @@ def format_e164(parsed) -> str:
     return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
 
 
-def _valid_or_none(raw: str, region=None):
+def valid_or_none(raw: str, region=None):
     """Parse and accept only when libphonenumber says the number is valid."""
     try:
         parsed = phonenumbers.parse(raw, region)
@@ -213,7 +213,7 @@ def format_cc_national(cc: str, national: str) -> str:
     national = digits_only(national)
     if not cc or not national:
         return ""
-    parsed = _valid_or_none("+" + cc + national)
+    parsed = valid_or_none("+" + cc + national)
     return format_e164(parsed) if parsed else ""
 
 
@@ -222,13 +222,13 @@ def format_for_region(raw_phone, region: str) -> str:
     cleaned = collapse_whitespace(strip_excel_artifacts(raw_phone))
     if not cleaned or not region:
         return ""
-    parsed = _valid_or_none(cleaned, (region or "").upper())
+    parsed = valid_or_none(cleaned, (region or "").upper())
     return format_e164(parsed) if parsed else ""
 
 
 def classify_phone(raw_phone) -> str:
     """Classify the input before touching it: empty, garbage, noise, has_cc, missing_cc."""
-    raw = _unwrap_bracketed_cc(collapse_whitespace(strip_excel_artifacts(raw_phone)))
+    raw = unwrap_bracketed_cc(collapse_whitespace(strip_excel_artifacts(raw_phone)))
     if not raw:
         return "empty"
     digits = digits_only(raw)
@@ -249,7 +249,7 @@ def parse_phone(raw_phone, email="", company="", country=""):
     PHONE_STATUSES and `raw` is always the as-submitted value.
     """
     submitted = cell(raw_phone)
-    cleaned = _unwrap_bracketed_cc(collapse_whitespace(strip_excel_artifacts(raw_phone)))
+    cleaned = unwrap_bracketed_cc(collapse_whitespace(strip_excel_artifacts(raw_phone)))
     kind = classify_phone(raw_phone)
     base = {"raw": submitted, "class_": kind}
 
@@ -266,7 +266,7 @@ def parse_phone(raw_phone, email="", company="", country=""):
     digits = digits_only(cleaned)
 
     # 1. The value already carries its own country code.
-    parsed = _valid_or_none(cleaned, None)
+    parsed = valid_or_none(cleaned, None)
     if parsed:
         return {
             **base, "value": format_e164(parsed), "status": STATUS_VALID,
@@ -276,7 +276,7 @@ def parse_phone(raw_phone, email="", company="", country=""):
     # 2/3. Digits that already contain a calling code, either flagged
     # international (+ / 00) or leading with a known code. Nothing is invented.
     if kind == "has_cc" or region_from_digits(digits):
-        parsed = _valid_or_none("+" + digits, None)
+        parsed = valid_or_none("+" + digits, None)
         if parsed:
             return {
                 **base, "value": format_e164(parsed), "status": STATUS_VALID,
@@ -293,7 +293,7 @@ def parse_phone(raw_phone, email="", company="", country=""):
         if not region:
             continue
         had_evidence = True
-        parsed = _valid_or_none(cleaned, region.upper())
+        parsed = valid_or_none(cleaned, region.upper())
         if parsed:
             return {
                 **base, "value": format_e164(parsed), "status": STATUS_VALID,
@@ -303,7 +303,7 @@ def parse_phone(raw_phone, email="", company="", country=""):
     # 6. No country evidence anywhere in the record: try NANP and keep the
     # result only if libphonenumber validates it.
     if kind == "missing_cc" and not had_evidence:
-        parsed = _valid_or_none(cleaned, NANP_FALLBACK_REGION)
+        parsed = valid_or_none(cleaned, NANP_FALLBACK_REGION)
         if parsed:
             return {
                 **base, "value": format_e164(parsed), "status": STATUS_VALID,
