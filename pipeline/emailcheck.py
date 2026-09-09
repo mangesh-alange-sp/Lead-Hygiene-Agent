@@ -11,6 +11,10 @@ Two operational concerns are handled here so the pipeline stays deterministic:
     never issues the same lookup twice and offline runs still reproduce.
   * A DNS failure is not proof of undeliverability. When the resolver cannot be
     reached the address is kept and flagged `unknown`, never silently nulled.
+  * A negative MX result is also not proof the address should be deleted. The
+    value stays on the row, flagged `undeliverable`, so enrichment can try a
+    replacement. Only invalid syntax and configured placeholder/reserved
+    domains are cleared here.
 
 Set LEAD_HYGIENE_MX_LOOKUP=0 to answer purely from cache (used by the tests).
 """
@@ -21,6 +25,7 @@ from pathlib import Path
 
 from email_validator import EmailNotValidError, caching_resolver, validate_email
 
+from .domains import is_placeholder_domain
 from .textnorm import cell
 
 MX_CACHE_PATH = Path(__file__).resolve().parent.parent / "data" / "mx_cache.json"
@@ -109,7 +114,8 @@ def validate_lead_email(email):
     Returns {value, status, reason, raw}.
 
     status is deliverable | undeliverable | invalid_syntax | unknown.
-    `value` is the normalized address, or '' when it must be nulled.
+    `value` is the normalized address, or '' when it must be nulled
+    (invalid syntax or a placeholder/reserved domain).
     """
     raw = cell(email)
     if not raw:
@@ -126,10 +132,13 @@ def validate_lead_email(email):
     normalized = info.normalized.lower()
     domain = info.domain.lower()
 
-    if is_reserved_domain(domain):
+    if is_reserved_domain(domain) or is_placeholder_domain(domain):
         return {
             "value": "", "status": UNDELIVERABLE, "raw": raw,
-            "reason": f"email: cleared, {domain} is an RFC-reserved domain that cannot receive mail",
+            "reason": (
+                f"email: cleared, {domain} is a placeholder or RFC-reserved "
+                "domain that cannot receive mail"
+            ),
         }
 
     try:
@@ -142,7 +151,10 @@ def validate_lead_email(email):
 
     if not routable:
         return {
-            "value": "", "status": UNDELIVERABLE, "raw": raw,
-            "reason": f"email: cleared, {domain} has no mail exchanger (MX lookup)",
+            "value": normalized, "status": UNDELIVERABLE, "raw": raw,
+            "reason": (
+                f"email: kept, {domain} has no mail exchanger (MX lookup); "
+                "flagged so enrichment can search for a replacement"
+            ),
         }
     return {"value": normalized, "status": DELIVERABLE, "reason": "", "raw": raw}

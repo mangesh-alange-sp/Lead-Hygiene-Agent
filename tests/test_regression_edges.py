@@ -157,7 +157,7 @@ class RegressionDiffTests(unittest.TestCase):
         tampered = golden.replace(",PM,", ",Director,", 1)
         self.assertNotEqual(tampered, golden)
         ctx = _Ctx()
-        out = asyncio.run(run_dedup_pipeline(tampered, ctx))
+        out = asyncio.run(run_dedup_pipeline(tampered, tool_context=ctx))
         self.assertEqual(out["status"], "error")
         self.assertTrue(out["field_diffs"])
         self.assertEqual(ctx.saved, [], "no artifact may be saved on a blocked run")

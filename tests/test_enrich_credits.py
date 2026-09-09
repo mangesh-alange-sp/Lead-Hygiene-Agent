@@ -136,9 +136,13 @@ class CompanyReuse(unittest.TestCase):
         payloads = self.api.company_payloads()
         self.assertEqual(len(payloads), 1)
         self.assertEqual(len(payloads[0]["companies"]), 1)
-        self.assertEqual(list(df["Website"]), ["https://result.co", "https://result.co"])
+        self.assertEqual(list(df["Website"]), ["", ""])
         self.assertEqual(list(df["NumberOfEmployees"]), ["250", "250"])
-        self.assertEqual(list(df["AnnualRevenue"]), ["10000000", "10000000"])
+        self.assertEqual(list(df["AnnualRevenue"]), ["", ""])
+        self.assertEqual(
+            [entry["revenue_min"] for entry in stats["revenue_ranges"]],
+            [10000000, 10000000],
+        )
 
     def test_a_missing_website_does_not_trigger_a_contact_call(self):
         df = _frame(
@@ -154,12 +158,13 @@ class CompanyReuse(unittest.TestCase):
         df = _frame(
             [["1", "Pat", "Smith", "pat@acme.com", "+14155550100", "Acme", "https://acme.com", "Tech", "", ""]]
         )
-        df, _ = enrich.enrich_dataframe(df)
+        df, stats = enrich.enrich_dataframe(df)
 
         self.assertEqual(self.api.contact_payloads(), [])
         self.assertEqual(len(self.api.company_payloads()), 1)
         self.assertEqual(df.at[0, "NumberOfEmployees"], "250")
-        self.assertEqual(df.at[0, "AnnualRevenue"], "10000000")
+        self.assertEqual(df.at[0, "AnnualRevenue"], "")
+        self.assertEqual(stats["revenue_ranges"][0]["revenue_min"], 10000000)
 
     def test_informal_employee_and_revenue_headers_are_filled(self):
         df = pd.DataFrame(
@@ -179,9 +184,29 @@ class CompanyReuse(unittest.TestCase):
         df, _ = enrich.enrich_dataframe(df)
 
         self.assertEqual(df.at[0, "No of employee"], "250")
-        self.assertEqual(df.at[0, "Annual Revenue"], "10000000")
+        self.assertEqual(df.at[0, "Annual Revenue"], "")
         self.assertNotIn("NumberOfEmployees", df.columns)
         self.assertNotIn("AnnualRevenue", df.columns)
+
+    def test_an_exact_revenue_is_written_to_annual_revenue(self):
+        def exact_revenue(url, payload):
+            results = []
+            for item in payload.get("companies") or []:
+                results.append({
+                    "clientReferenceId": item["clientReferenceId"],
+                    "name": "Acme",
+                    "domain": "acme.com",
+                    "revenueRange": {"exact": 4200000, "min": 1000000, "max": 5000000},
+                })
+            return {"status": "ok", "results": results, "billing": {"creditsCharged": 1}}
+
+        enrich._lusha_post = exact_revenue
+        df = _frame(
+            [["1", "Pat", "Smith", "pat@acme.com", "+14155550100", "Acme", "https://acme.com", "Tech", "", "50"]]
+        )
+        df, stats = enrich.enrich_dataframe(df)
+        self.assertEqual(df.at[0, "AnnualRevenue"], "4200000")
+        self.assertEqual(stats["revenue_ranges"], [])
 
 
 if __name__ == "__main__":

@@ -170,6 +170,9 @@ Alias tables only. `pipeline/taxonomy.py` reads each `##` section as `{alias: ca
 | transportation | Transportation & Logistics |
 | logistics | Transportation & Logistics |
 | supply chain | Transportation & Logistics |
+| transportation and logistics | Transportation & Logistics |
+| software and technology | Technology |
+| healthcare and medical | Healthcare |
 | legal | Legal |
 | law firm | Legal |
 | law | Legal |

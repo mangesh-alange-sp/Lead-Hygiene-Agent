@@ -1,6 +1,8 @@
 """
 enrich.py
-Lusha Search and Enrich: fill blank lead fields without overwriting existing values.
+Lusha Search and Enrich: fill blank lead fields without overwriting
+existing values, except an unvalidated Email which may be replaced by a
+company-aligned address (or blanked when none is trusted).
 https://docs.lusha.com/apis/openapi/search-and-enrich/searchandenrichcontacts
 """
 
@@ -15,8 +17,15 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
-from .domains import is_personal_domain
-from .textnorm import BLANK_TOKENS, alias_key
+from .domains import (
+    domain_matches_company,
+    host_of,
+    is_personal_domain,
+    is_plausible_domain,
+)
+from .emailcheck import DELIVERABLE
+from .normalize import normalize_industry
+from .textnorm import BLANK_TOKENS, alias_key, email_domain
 
 LUSHA_CONTACTS_URL = "https://api.lusha.com/v3/contacts/search-and-enrich"
 LUSHA_COMPANIES_URL = "https://api.lusha.com/v3/companies/search-and-enrich"
@@ -75,6 +84,105 @@ def _needs_fill(row: pd.Series, fields) -> bool:
     return any(
         (col := _actual_column(row.index, field)) is not None and _is_blank(row.get(col))
         for field in fields
+    )
+
+
+def _lead_id(df: pd.DataFrame, idx) -> str:
+    if "Id" in df.columns:
+        return _cell(df.at[idx, "Id"])
+    return str(idx)
+
+
+def _email_host(email) -> str:
+    return email_domain(email)
+
+
+def _hosts_equivalent(left, right) -> bool:
+    a, b = host_of(left), host_of(right)
+    if not a or not b:
+        return False
+    return a == b or a.endswith("." + b) or b.endswith("." + a)
+
+
+def _email_is_unvalidated(row) -> bool:
+    """True when hygiene said this address is not deliverable (MX miss, unknown)."""
+    status = _cell(row.get("email_status", "")).lower()
+    if not status:
+        return False
+    return status != DELIVERABLE
+
+
+def _email_is_company_aligned(email, row) -> bool:
+    """Accept a Lusha email only when its host belongs with this lead."""
+    host = _email_host(email)
+    if not host or is_personal_domain(host):
+        return False
+    company = _cell(row.get("Company", ""))
+    if company and domain_matches_company(host, company):
+        return True
+    website_host = host_of(row.get("Website", ""))
+    if website_host and not is_personal_domain(website_host) and _hosts_equivalent(host, website_host):
+        return True
+    current_host = _email_host(row.get("Email", ""))
+    if current_host and not is_personal_domain(current_host) and _hosts_equivalent(host, current_host):
+        return True
+    return False
+
+
+def _website_is_trusted(url, row) -> bool:
+    host = host_of(url)
+    if not host or not is_plausible_domain(host):
+        return False
+    company = _cell(row.get("Company", ""))
+    if company and domain_matches_company(host, company):
+        return True
+    existing = host_of(row.get("Website", ""))
+    email_host = _email_host(row.get("Email", ""))
+    if email_host and is_personal_domain(email_host):
+        email_host = ""
+    preferred = existing or email_host
+    return bool(preferred) and _hosts_equivalent(host, preferred)
+
+
+def _needs_email_reveal(row) -> bool:
+    col = _actual_column(row.index, "Email")
+    if col is None:
+        return False
+    if _is_blank(row.get(col)):
+        return True
+    return _email_is_unvalidated(row)
+
+
+def _add_review(stats: dict, df: pd.DataFrame, idx, reason: str) -> None:
+    lead_id = _lead_id(df, idx)
+    reviews = stats.setdefault("enrichment_review", [])
+    for item in reviews:
+        if item["id"] == lead_id:
+            if reason not in item["reasons"]:
+                item["reasons"].append(reason)
+            return
+    reviews.append({
+        "id": lead_id,
+        "email": _cell(df.at[idx, "Email"]) if "Email" in df.columns else "",
+        "email_raw": _cell(df.at[idx, "Email_raw"]) if "Email_raw" in df.columns else "",
+        "company": _cell(df.at[idx, "Company"]) if "Company" in df.columns else "",
+        "website": _cell(df.at[idx, "Website"]) if "Website" in df.columns else "",
+        "reasons": [reason],
+    })
+
+
+def _blank_unvalidated_email(df: pd.DataFrame, idx, stats: dict) -> None:
+    col = _actual_column(df.columns, "Email")
+    if col is None:
+        return
+    current = _cell(df.at[idx, col])
+    if not current or not _email_is_unvalidated(df.loc[idx]):
+        return
+    df.at[idx, col] = ""
+    stats.setdefault("email_blanked_no_replacement_ids", []).append(_lead_id(df, idx))
+    _add_review(
+        stats, df, idx,
+        "unvalidated email had no company-aligned replacement",
     )
 
 
@@ -162,12 +270,50 @@ def _fill(df: pd.DataFrame, idx, field: str, new_value: str) -> int:
     return 1
 
 
-def _apply_contact(df: pd.DataFrame, idx, result: dict) -> int:
+def _fill_website(df: pd.DataFrame, idx, url, stats: dict) -> int:
+    col = _actual_column(df.columns, "Website")
+    if col is None or not _cell(url) or not _is_blank(df.at[idx, col]):
+        return 0
+    if not _website_is_trusted(url, df.loc[idx]):
+        stats["websites_rejected"] = stats.get("websites_rejected", 0) + 1
+        _add_review(stats, df, idx, "rejected Lusha website (not company-aligned)")
+        return 0
+    text = _cell(url)
+    if "://" not in text:
+        text = f"https://{text}"
+    df.at[idx, col] = text
+    return 1
+
+
+def _apply_email(df: pd.DataFrame, idx, candidate: str, stats: dict, reveal) -> int:
+    if "emails" not in (reveal or ()):
+        return 0
+    col = _actual_column(df.columns, "Email")
+    if col is None:
+        return 0
+    row = df.loc[idx]
+    current = _cell(df.at[idx, col])
+    if candidate and _email_is_company_aligned(candidate, row):
+        if current.lower() == candidate.lower():
+            return 0
+        df.at[idx, col] = candidate
+        return 1
+    if candidate:
+        stats["emails_rejected"] = stats.get("emails_rejected", 0) + 1
+        _add_review(stats, df, idx, "rejected Lusha email (not company-aligned)")
+    if current and _email_is_unvalidated(row):
+        _blank_unvalidated_email(df, idx, stats)
+    return 0
+
+
+def _apply_contact(df: pd.DataFrame, idx, result: dict, stats: dict, reveal=()) -> int:
     filled = 0
     filled += _fill(df, idx, "FirstName", result.get("firstName"))
     filled += _fill(df, idx, "LastName", result.get("lastName"))
-    filled += _fill(df, idx, "Email", _pick_email(result.get("emails")))
-    filled += _fill(df, idx, "Phone", _pick_phone(result.get("phones")))
+    filled += _apply_email(df, idx, _pick_email(result.get("emails")), stats, reveal)
+    phone_col = _actual_column(df.columns, "Phone")
+    if phone_col is None or _is_blank(df.at[idx, phone_col]):
+        filled += _fill(df, idx, "Phone", _pick_phone(result.get("phones")))
 
     job = result.get("jobTitle") or {}
     title = job.get("title") if isinstance(job, dict) else job
@@ -178,20 +324,53 @@ def _apply_contact(df: pd.DataFrame, idx, result: dict) -> int:
         filled += _fill(df, idx, "Company", company.get("name"))
         filled += _fill(df, idx, "Industry", company.get("industry"))
         domain = _cell(company.get("domain"))
-        if domain and "://" not in domain:
-            domain = f"https://{domain}"
-        filled += _fill(df, idx, "Website", domain)
+        filled += _fill_website(df, idx, domain, stats)
     return filled
 
 
-def _apply_company(df: pd.DataFrame, idx, result: dict) -> int:
+def _as_int(value):
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_revenue_range(stats: dict, df: pd.DataFrame, idx, revenue: dict) -> None:
+    rmin = _as_int(revenue.get("min"))
+    rmax = _as_int(revenue.get("max"))
+    if rmin is None and rmax is None:
+        return
+    stats.setdefault("revenue_ranges", []).append({
+        "id": _lead_id(df, idx),
+        "revenue_min": "" if rmin is None else rmin,
+        "revenue_max": "" if rmax is None else rmax,
+    })
+
+
+def _apply_revenue(df: pd.DataFrame, idx, result: dict, stats: dict) -> int:
+    """
+    AnnualRevenue is an exact figure. Lusha's revenueRange.min/max is a
+    bucket, so it is stored in stats only and never written to the CSV.
+    """
+    revenue = result.get("revenueRange")
+    if not isinstance(revenue, dict):
+        revenue = {}
+    exact = _as_int(revenue.get("exact"))
+    if exact is None and not isinstance(result.get("revenue"), dict):
+        exact = _as_int(result.get("revenue"))
+    if exact is not None:
+        return _fill(df, idx, "AnnualRevenue", str(exact))
+    _record_revenue_range(stats, df, idx, revenue)
+    return 0
+
+
+def _apply_company(df: pd.DataFrame, idx, result: dict, stats: dict) -> int:
     filled = 0
     filled += _fill(df, idx, "Company", result.get("name"))
     filled += _fill(df, idx, "Industry", result.get("industry"))
-    domain = _cell(result.get("domain"))
-    if domain and "://" not in domain:
-        domain = f"https://{domain}"
-    filled += _fill(df, idx, "Website", domain)
+    filled += _fill_website(df, idx, result.get("domain"), stats)
 
     employees = result.get("employeeCount") or {}
     if isinstance(employees, dict):
@@ -201,9 +380,7 @@ def _apply_company(df: pd.DataFrame, idx, result: dict) -> int:
         if count is not None:
             filled += _fill(df, idx, "NumberOfEmployees", str(int(count)))
 
-    revenue = result.get("revenueRange") or {}
-    if isinstance(revenue, dict) and revenue.get("min") is not None:
-        filled += _fill(df, idx, "AnnualRevenue", str(int(revenue["min"])))
+    filled += _apply_revenue(df, idx, result, stats)
     return filled
 
 
@@ -288,9 +465,10 @@ def _chunks(items: list, size: int):
 def _needed_reveal(df: pd.DataFrame, idx) -> tuple:
     """Paid data points this one row is missing. Never widened to the batch."""
     reveal = []
-    if "Email" in df.columns and _is_blank(df.at[idx, "Email"]):
+    if _needs_email_reveal(df.loc[idx]):
         reveal.append("emails")
-    if "Phone" in df.columns and _is_blank(df.at[idx, "Phone"]):
+    phone_col = _actual_column(df.columns, "Phone")
+    if phone_col is not None and _is_blank(df.at[idx, phone_col]):
         reveal.append("phones")
     return tuple(reveal)
 
@@ -352,7 +530,7 @@ def _enrich_companies(df: pd.DataFrame, stats: dict) -> tuple:
 
     for key, result in results_by_key.items():
         for idx in rows_by_key[key]:
-            filled = _apply_company(df, idx, result)
+            filled = _apply_company(df, idx, result, stats)
             stats["fields_filled"] += filled
             if filled:
                 matched.add(idx)
@@ -366,7 +544,7 @@ def _enrich_contacts(df: pd.DataFrame, stats: dict) -> tuple:
     """
     cohorts = {}
     for idx, row in df.iterrows():
-        if not _needs_fill(row, PERSON_FIELDS):
+        if not (_needs_fill(row, PERSON_FIELDS) or _needs_email_reveal(row)):
             continue
         item = _contact_identifier(row, str(idx))
         if not item:
@@ -403,8 +581,12 @@ def _enrich_contacts(df: pd.DataFrame, stats: dict) -> tuple:
                 sent.add(idx)
                 result = by_ref.get(item["clientReferenceId"])
                 if not result or result.get("error"):
+                    if "emails" in reveal:
+                        _blank_unvalidated_email(df, idx, stats)
                     continue
-                stats["fields_filled"] += _apply_contact(df, idx, result)
+                stats["fields_filled"] += _apply_contact(
+                    df, idx, result, stats, reveal=reveal,
+                )
                 matched.add(idx)
     return sent, matched, None
 
@@ -426,6 +608,11 @@ def enrich_dataframe(df: pd.DataFrame) -> tuple:
         "rows_skipped": 0,
         "fields_filled": 0,
         "credits_charged": 0,
+        "email_blanked_no_replacement_ids": [],
+        "enrichment_review": [],
+        "emails_rejected": 0,
+        "websites_rejected": 0,
+        "revenue_ranges": [],
     }
 
     company_sent, company_matched, error = _enrich_companies(df, stats)
@@ -442,4 +629,42 @@ def enrich_dataframe(df: pd.DataFrame) -> tuple:
     stats["rows_matched"] = len(matched)
     stats["rows_not_found"] = len(sent - matched)
     stats["rows_skipped"] = len(df) - len(sent)
+    _normalize_industries(df, stats)
+    _flag_company_mismatches(df, stats)
     return df, stats
+
+
+def _normalize_industries(df: pd.DataFrame, stats: dict) -> None:
+    """Map Lusha (and leftover) Industry values onto the closed picklist."""
+    col = _actual_column(df.columns, "Industry")
+    if col is None:
+        return
+    for idx in df.index:
+        raw = df.at[idx, col]
+        if _is_blank(raw):
+            continue
+        mapped, unknown = normalize_industry(raw)
+        if mapped != _cell(raw):
+            df.at[idx, col] = mapped
+        if unknown:
+            _add_review(
+                stats, df, idx,
+                "unknown industry (not on the canonical picklist)",
+            )
+
+
+def _flag_company_mismatches(df: pd.DataFrame, stats: dict) -> None:
+    """Flag leftover email/website vs Company mismatches for the review file."""
+    for idx, row in df.iterrows():
+        company = _cell(row.get("Company", ""))
+        email = _cell(row.get("Email", ""))
+        host = _email_host(email)
+        if company and host and not is_personal_domain(host) and not domain_matches_company(host, company):
+            _add_review(stats, df, idx, "email domain does not match Company")
+        site_host = host_of(row.get("Website", ""))
+        if not site_host:
+            continue
+        if not is_plausible_domain(site_host):
+            _add_review(stats, df, idx, "website is not a plausible company domain")
+        elif company and not domain_matches_company(site_host, company):
+            _add_review(stats, df, idx, "website does not match Company")

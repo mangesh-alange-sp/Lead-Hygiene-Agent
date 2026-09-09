@@ -9,7 +9,13 @@ import io
 import unittest
 from pathlib import Path
 
+from pipeline.invariants import (
+    check_records,
+    phone_has_text_marker,
+    phone_looks_like_excel_formula,
+)
 from pipeline.phone import (
+    E164_RE,
     NANP_FALLBACK_REGION,
     STATUS_NEEDS_REVIEW,
     STATUS_VALID,
@@ -21,6 +27,7 @@ from pipeline.regression import (
     diff_against_golden,
 )
 from pipeline.schema import check_phone_states
+from pipeline.textnorm import digits_only
 from pipeline.tools import process_csv
 
 import pandas as pd
@@ -101,7 +108,8 @@ class PhoneStatusColumnTests(unittest.TestCase):
 
     def test_audit_log_exposes_phone_status_and_reason(self):
         header = list(csv.reader(io.StringIO(self.result["audit_csv"])))[0]
-        for column in ("phone_status", "phone_reason", "phone_raw"):
+        for column in ("phone_status", "phone_reason", "phone_raw",
+                       "phone_extension", "email_status", "email_raw"):
             self.assertIn(column, header)
 
     def test_no_phone_record_is_left_without_a_state(self):
@@ -277,6 +285,106 @@ class ExcelRenderingTests(unittest.TestCase):
         self.assertEqual(_excel_text_guard("(206) 555-0100"), "(206) 555-0100")
 
 
+class UnvalidatedInternationalPhoneTests(unittest.TestCase):
+    """
+    A +CC number libphonenumber rejects is kept for review, but it must still
+    be written in a shape the Excel-formula invariant accepts. '+971 4 123 4567'
+    used to reach the gate with spaces intact and hard-fail the whole batch.
+    """
+
+    UNVALIDATED = "+971 4 123 4567"
+
+    def _run(self, raw):
+        csv_in = (
+            "Id,FirstName,LastName,Email,Phone,Company,Country\n"
+            f'00QZ9,Pat,Lee,pat@acme.com,"{raw}",Acme Corp,\n'
+        )
+        return process_csv(csv_in)
+
+    def test_regrouping_keeps_every_digit_and_the_country_code(self):
+        from pipeline.phone import excel_safe_international
+
+        self.assertEqual(
+            excel_safe_international("+971 4 123 4567"), "+971-4-123-4567"
+        )
+        self.assertEqual(
+            excel_safe_international("+1 (206) 555-0100"), "+1-206-555-0100"
+        )
+        self.assertEqual(digits_only(excel_safe_international(self.UNVALIDATED)),
+                         digits_only(self.UNVALIDATED))
+
+    def test_already_safe_and_national_values_are_untouched(self):
+        from pipeline.phone import excel_safe_international
+
+        for value in ("+12065550100", "+971-4-123-4567", "2065550100",
+                      "(206) 555-0100", "022-1234-5678", ""):
+            with self.subTest(value=value):
+                self.assertEqual(excel_safe_international(value), value)
+
+    def test_a_leading_minus_at_or_equals_is_dropped_not_kept(self):
+        from pipeline.phone import excel_safe_international
+
+        # Only '+' carries dialling meaning; the rest are spreadsheet artifacts.
+        for value in ("-971 4 123 4567", "=971 4 123 4567", "@971 4 123 4567"):
+            with self.subTest(value=value):
+                self.assertEqual(excel_safe_international(value), "971-4-123-4567")
+        self.assertEqual(excel_safe_international("+971 4 123 4567"), "+971-4-123-4567")
+
+    def test_a_value_with_no_digits_at_all_becomes_blank(self):
+        from pipeline.phone import excel_safe_international
+
+        for value in ("+", "-", "=", "@", "- - -"):
+            with self.subTest(value=value):
+                self.assertEqual(excel_safe_international(value), "")
+
+    def test_a_minus_prefixed_number_does_not_block_the_batch(self):
+        result = self._run("-971 4 123 4567")
+        self.assertEqual(result["status"], "ok", result.get("message"))
+        row = next(csv.DictReader(io.StringIO(result["csv"])))
+        self.assertFalse(phone_looks_like_excel_formula(row["Phone"]), row["Phone"])
+        self.assertEqual(digits_only(row["Phone"]), "97141234567")
+
+    def test_the_batch_is_not_blocked(self):
+        result = self._run(self.UNVALIDATED)
+        self.assertEqual(result["status"], "ok", result.get("message"))
+
+    def test_the_written_value_cannot_be_read_as_a_formula(self):
+        result = self._run(self.UNVALIDATED)
+        self.assertEqual(result["status"], "ok", result.get("message"))
+        row = next(csv.DictReader(io.StringIO(result["csv"])))
+        self.assertFalse(phone_looks_like_excel_formula(row["Phone"]), row["Phone"])
+        self.assertEqual(check_records([row]), [])
+
+    def test_the_number_is_still_flagged_for_review_not_silently_fixed(self):
+        result = self._run(self.UNVALIDATED)
+        self.assertEqual(result["status"], "ok", result.get("message"))
+        row = next(csv.DictReader(io.StringIO(result["csv"])))
+        self.assertEqual(digits_only(row["Phone"]), digits_only(self.UNVALIDATED))
+        self.assertNotRegex(row["Phone"], E164_RE)
+        self.assertEqual(result["summary"]["phone_states"].get(STATUS_NEEDS_REVIEW), 1)
+
+    def test_excel_markers_in_front_of_an_unvalidated_number_are_handled(self):
+        for prefix in ("'", "=", "\t"):
+            with self.subTest(prefix=prefix):
+                result = self._run(prefix + self.UNVALIDATED)
+                self.assertEqual(result["status"], "ok", result.get("message"))
+                row = next(csv.DictReader(io.StringIO(result["csv"])))
+                self.assertFalse(phone_looks_like_excel_formula(row["Phone"]))
+                self.assertFalse(phone_has_text_marker(row["Phone"]))
+
+    def test_valid_international_numbers_still_collapse_to_e164(self):
+        for raw, expected in (
+            ("+44 7771 695127", "+447771695127"),
+            ("+31 40 268 3000", "+31402683000"),
+            ("+1 (206) 555-0100", "+12065550100"),
+        ):
+            with self.subTest(raw=raw):
+                result = self._run(raw)
+                self.assertEqual(result["status"], "ok", result.get("message"))
+                row = next(csv.DictReader(io.StringIO(result["csv"])))
+                self.assertEqual(row["Phone"], expected)
+
+
 class RegressionGateWiringTests(unittest.TestCase):
     def test_the_current_run_matches_the_baseline(self):
         result = process_csv(FIXTURE.read_text(encoding="utf-8"))
@@ -322,6 +430,24 @@ class RegressionGateWiringTests(unittest.TestCase):
     def test_diff_reports_id_field_old_and_new(self):
         result = process_csv(FIXTURE.read_text(encoding="utf-8"))
         self.assertEqual(diff_against_golden(result["csv"]), [])
+
+
+class PhoneExtensionWritebackTests(unittest.TestCase):
+    def test_extension_stays_off_phone_and_lands_in_the_audit_log(self):
+        csv_in = (
+            "Id,FirstName,LastName,Email,Phone,Company,Country\n"
+            "00Q1,Pat,Lee,pat@acme.com,989.345.3660 Ext. 3151,Acme,US\n"
+        )
+        result = process_csv(csv_in)
+        self.assertEqual(result["status"], "ok", result.get("message"))
+        row = next(csv.DictReader(io.StringIO(result["csv"])))
+        self.assertEqual(row["Phone"], "+19893453660")
+        self.assertNotIn("PhoneExtension", row)
+        self.assertNotIn("3151", row["Phone"])
+        audit = {r["surviving_lead_id"]: r for r in csv.DictReader(io.StringIO(result["audit_csv"]))}
+        self.assertEqual(audit["00Q1"]["phone_extension"], "3151")
+        self.assertEqual(audit["00Q1"]["phone_raw"], "989.345.3660 Ext. 3151")
+        self.assertEqual(audit["00Q1"]["phone_status"], STATUS_VALID)
 
 
 if __name__ == "__main__":

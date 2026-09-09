@@ -15,11 +15,18 @@ from google.genai import types
 
 from .dedupe import deduplicate_dataframe
 from .enrich import enrich_dataframe
-from .invariants import check_exported_schema, check_records, phone_lost_country_code
+from .invariants import (
+    check_enrich_preservation,
+    check_exported_schema,
+    check_records,
+    phone_lost_country_code,
+    row_level_violations,
+    snapshot_email_phone,
+)
 
 from .normalize import normalize_dataframe
 from .domains import company_match_key, host_of
-from .phone import STATUS_NEEDS_REVIEW
+from .phone import STATUS_NEEDS_REVIEW, excel_safe_international
 from .regression import as_dicts, diff_against_golden, format_changes
 from .schema import check_output_schema
 from .textnorm import cell, digits_only, fold_text, strip_excel_artifacts
@@ -28,16 +35,32 @@ from .website import normalize_website, resolve_website
 
 MAX_ROWS = 5000
 MAX_CSV_CHARS = 2_000_000
+CHUNK_SIZE = 200
 MAX_FIELD_EXAMPLES = 12
 MAX_CHANGE_ROWS = 400
 INTERNAL_COLS = (
     "data_quality_flags", "hitl_review", "phone_status", "phone_reason",
-    "Phone_raw", "change_reasons", "completeness_flag", "email_status",
+    "Phone_raw", "PhoneExtension", "Email_raw", "change_reasons",
+    "completeness_flag", "email_status",
 )
 PHONE_WRITE_COLS = ("Phone", "MobilePhone")
 ENRICH_REQUIRES_DEDUP_MESSAGE = (
     "Cannot enrich: run_dedup_pipeline has not produced deduped.csv in this "
     "session. Run dedup first."
+)
+REVIEW_FILE = "needs_review.csv"
+ENRICH_REVIEW_FILE = "enrichment_review.csv"
+# Written by this module. Never mistaken for the user's upload.
+GENERATED_ARTIFACTS = (
+    "deduped.csv",
+    "dedup_log.csv",
+    "deduped_excel_review.csv",
+    "enriched.csv",
+    REVIEW_FILE,
+)
+NO_UPLOAD_MESSAGE = (
+    "No lead CSV found for this session. Attach the CSV file to the chat, then "
+    "ask again. Do not paste the rows into the tool call."
 )
 AUDIT_FIELDS = (
     "surviving_lead_id",
@@ -51,6 +74,9 @@ AUDIT_FIELDS = (
     "phone_status",
     "phone_reason",
     "phone_raw",
+    "phone_extension",
+    "email_status",
+    "email_raw",
 )
 
 
@@ -128,10 +154,12 @@ def _build_audit_log(df: pd.DataFrame, merge_log: list) -> str:
         lead_id = str(record.get("Id", "") or "")
         flags = str(record.get("data_quality_flags", "") or "")
         phone_status = cell(record.get("phone_status", ""))
+        email_status = cell(record.get("email_status", ""))
         entry = by_id.pop(lead_id, None)
         # A resolved phone still gets a line, so "validated, done" is visible
-        # in the data rather than inferred from the value's shape.
-        if not entry and not flags and not phone_status:
+        # in the data rather than inferred from the value's shape. The same
+        # for email: MX/status must be readable after the write-back is stripped.
+        if not entry and not flags and not phone_status and not email_status:
             continue
         entry = entry or {}
         rows.append({
@@ -145,6 +173,9 @@ def _build_audit_log(df: pd.DataFrame, merge_log: list) -> str:
             "phone_status": phone_status,
             "phone_reason": cell(record.get("phone_reason", "")),
             "phone_raw": cell(record.get("Phone_raw", "")),
+            "phone_extension": cell(record.get("PhoneExtension", "")),
+            "email_status": email_status,
+            "email_raw": cell(record.get("Email_raw", "")),
         })
     # Ids that were merged away still deserve a log line.
     for lead_id, entry in by_id.items():
@@ -159,6 +190,9 @@ def _build_audit_log(df: pd.DataFrame, merge_log: list) -> str:
             "phone_status": "",
             "phone_reason": "",
             "phone_raw": "",
+            "phone_extension": "",
+            "email_status": "",
+            "email_raw": "",
         })
 
     output = io.StringIO()
@@ -179,6 +213,7 @@ def _audit_decision(flags: str) -> str:
     if any(flag in parts for flag in (
         "missing_email", "missing_phone", "unformatted_phone", "low_quality_title",
         "test_data", "junk_lead", "website_is_email", "needs_country_code_review",
+        "undeliverable_email", "email_deliverability_unknown",
     )):
         return "hitl_review"
     return ""
@@ -381,6 +416,7 @@ def _critical_lines(sections: list, dropped: list, routine: str) -> list:
 
 def _build_run_summary(source_df, writable, merge_log, audit_rows, counts) -> dict:
     """Deterministic changelog the agent narrates. Never invented by the model."""
+    quarantine = counts.get("quarantine") or {}
     source_by_id = {cell(row.get("Id", "")): row for row in source_df.to_dict("records")}
     out_by_id = {cell(row.get("Id", "")): row for row in writable.to_dict("records")}
     compare_cols = [col for col in writable.columns if col != "Id"]
@@ -493,13 +529,17 @@ def _build_run_summary(source_df, writable, merge_log, audit_rows, counts) -> di
             "records_dropped": counts["records_dropped"],
             "hitl_records": counts["hitl_records"],
             "blank_email_kept": counts["blank_email_kept"],
+            "rows_held_for_review": len(quarantine.get("ids") or []),
         },
         "files": [
             "deduped.csv — Salesforce write-back (same columns as the upload)",
             "dedup_log.csv — merges, dropped test rows, and review flags",
             "deduped_excel_review.csv — same rows, phones readable in Excel "
             "(review only, do not import)",
-        ],
+        ] + ([
+            f"{REVIEW_FILE} — {len(quarantine['ids'])} row(s) held back from the "
+            "write-back with the reason attached"
+        ] if quarantine.get("ids") else []),
         "merges": merges,
         "merge_lines": [merge["line"] for merge in merges],
         "dropped": dropped,
@@ -516,6 +556,9 @@ def _build_run_summary(source_df, writable, merge_log, audit_rows, counts) -> di
         "phone_states": counts.get("phone_states") or {},
         "field_diffs": counts.get("field_diffs") or [],
         "field_diff_lines": counts.get("field_diff_lines") or [],
+        "held_for_review": quarantine.get("rows") or [],
+        "held_for_review_lines": quarantine.get("lines") or [],
+        "held_for_review_reasons": quarantine.get("reason_counts") or {},
     }
 
 
@@ -536,6 +579,13 @@ def format_run_summary(summary: dict) -> str:
     if totals.get("hitl_records"):
         lines.append(f"HITL review: {totals['hitl_records']}")
     lines.append("dedup_log.csv is ready.")
+    if totals.get("rows_held_for_review"):
+        lines.append(
+            f"{REVIEW_FILE}: {totals['rows_held_for_review']} row(s) held back "
+            "from the write-back, everything else was delivered."
+        )
+        for line in summary.get("held_for_review_lines") or []:
+            lines.append(f"  {line}")
     states = summary.get("phone_states") or {}
     if states:
         lines.append(
@@ -577,25 +627,50 @@ def _agent_facing_summary(summary: dict) -> dict:
     """
     Slim payload for the model. merge_lines is first so it cannot be truncated
     behind the per-lead directory. The full summary stays in session state.
+
+    Chunked runs omit per-lead technical_log so the chat reply stays inside
+    the model output cap; those reasons remain in dedup_log.csv.
     """
+    chunked = int(summary.get("chunk_count") or 1) > 1
+    instruction = (
+        "What changed must be copied from critical_lines only. "
+        "Do not list company casing, industry maps, title expansions, "
+        "https prefixes, or phone regrouping. Do not write "
+        "Company: N changes, e.g. Copy every merge_lines entry."
+    )
+    if chunked:
+        instruction += (
+            " This run was batched. Copy chunk_note and every chunk_lines "
+            "entry. Per-lead reasons are in dedup_log.csv; do not invent them."
+        )
+    held_lines = summary.get("held_for_review_lines") or []
+    if held_lines:
+        instruction += (
+            f" {len(held_lines)} row(s) were held back from deduped.csv and "
+            f"written to {REVIEW_FILE} instead. Say so, give the count, and "
+            "copy every held_for_review_lines entry verbatim. The rest of the "
+            "file was delivered normally."
+        )
     return {
         "totals": summary.get("totals", {}),
         "files": summary.get("files", []),
+        "held_for_review_lines": held_lines[:MAX_FIELD_EXAMPLES],
+        "held_for_review_reasons": summary.get("held_for_review_reasons") or {},
         "merge_lines": summary.get("merge_lines", []),
         "merges": summary.get("merges", []),
         "dropped": summary.get("dropped", []),
         "critical_lines": summary.get("critical_lines", []),
         "routine_cleanup": summary.get("routine_cleanup", ""),
         "flag_counts": summary.get("flag_counts", {}),
-        "technical_log": summary.get("technical_log", []),
+        "phone_states": summary.get("phone_states", {}),
+        "technical_log": [] if chunked else (summary.get("technical_log") or []),
+        "chunk_count": summary.get("chunk_count") or 1,
+        "chunk_size": summary.get("chunk_size") or CHUNK_SIZE,
+        "chunk_note": summary.get("chunk_note") or "",
+        "chunk_lines": summary.get("chunk_lines") or [],
         "field_diffs": summary.get("field_diffs", []),
         "field_diff_lines": summary.get("field_diff_lines", []),
-        "instruction": (
-            "What changed must be copied from critical_lines only. "
-            "Do not list company casing, industry maps, title expansions, "
-            "https prefixes, or phone regrouping. Do not write "
-            "Company: N changes, e.g. Copy every merge_lines entry."
-        ),
+        "instruction": instruction,
     }
 
 
@@ -655,7 +730,9 @@ def _enforce_phone_website_gates(source_df: pd.DataFrame, df_out: pd.DataFrame) 
         if not src:
             continue
         if "Phone" in df_out.columns and phone_lost_country_code(src.get("Phone"), row.get("Phone")):
-            raw = cell(src.get("Phone"))
+            # Regrouped, not reformatted: restoring the source value verbatim can
+            # put a spreadsheet-evaluable string into the write-back.
+            raw = excel_safe_international(strip_excel_artifacts(src.get("Phone")))
             df_out.at[idx, "Phone"] = raw
             df_out.at[idx, "phone_status"] = STATUS_NEEDS_REVIEW
             df_out.at[idx, "hitl_review"] = "Yes"
@@ -718,6 +795,92 @@ def _fill_websites(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _quarantine_unwritable_rows(df_out: pd.DataFrame, source_cols) -> tuple:
+    """
+    Hold back rows that fail a row-level invariant instead of failing the batch.
+
+    A single dirty lead used to block every row it shipped with. The offending
+    rows go to needs_review.csv with the reason attached; the rest are written
+    back. Batch-shaped invariants still hard-fail in check_records.
+    """
+    empty = {"ids": [], "rows": [], "lines": [], "reason_counts": {}, "csv": ""}
+    if df_out.empty:
+        return df_out, empty
+
+    reasons_by_index = {}
+    for idx, record in zip(df_out.index, df_out.to_dict("records")):
+        reasons = row_level_violations(record)
+        if reasons:
+            reasons_by_index[idx] = reasons
+    if not reasons_by_index:
+        return df_out, empty
+
+    held = df_out.loc[list(reasons_by_index)]
+    rows, lines, reason_counts = [], [], {}
+    for idx, record in zip(held.index, held.to_dict("records")):
+        reasons = reasons_by_index[idx]
+        lead_id = cell(record.get("Id", ""))
+        rows.append({
+            "id": lead_id,
+            "name": " ".join(
+                part for part in
+                (cell(record.get("FirstName", "")), cell(record.get("LastName", "")))
+                if part
+            ),
+            "company": cell(record.get("Company", "")),
+            "email": cell(record.get("Email", "")),
+            "phone": cell(record.get("Phone", "")),
+            "phone_raw": cell(record.get("Phone_raw", "")),
+            "phone_extension": cell(record.get("PhoneExtension", "")),
+            "reasons": reasons,
+        })
+        lines.append(f"{lead_id} — {'; '.join(reasons)}")
+        for reason in reasons:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
+    review_cols = [col for col in source_cols if col in held.columns]
+    review = held.reindex(columns=review_cols).fillna("").copy()
+    review["needs_review_reason"] = [
+        "; ".join(reasons_by_index[idx]) for idx in held.index
+    ]
+    review["Phone_raw"] = [
+        cell(value) for value in held.get("Phone_raw", pd.Series("", index=held.index))
+    ]
+    review["phone_extension"] = [
+        cell(value) for value in held.get("PhoneExtension", pd.Series("", index=held.index))
+    ]
+    quarantine = {
+        "ids": [row["id"] for row in rows if row["id"]],
+        "rows": rows,
+        "lines": lines,
+        "reason_counts": reason_counts,
+        "csv": _write_salesforce_csv(review, list(review.columns)),
+    }
+    kept = df_out.drop(index=list(reasons_by_index))
+    return kept.reset_index(drop=True), quarantine
+
+
+def _merge_quarantines(parts: list) -> dict:
+    ids, rows, lines, reason_counts = [], [], [], {}
+    csvs = []
+    for part in parts:
+        quarantine = part.get("quarantine") or {}
+        ids.extend(quarantine.get("ids") or [])
+        rows.extend(quarantine.get("rows") or [])
+        lines.extend(quarantine.get("lines") or [])
+        for reason, count in (quarantine.get("reason_counts") or {}).items():
+            reason_counts[reason] = reason_counts.get(reason, 0) + count
+        if quarantine.get("csv"):
+            csvs.append(quarantine["csv"])
+    return {
+        "ids": ids,
+        "rows": rows,
+        "lines": lines,
+        "reason_counts": reason_counts,
+        "csv": _concat_csv_documents(csvs) if csvs else "",
+    }
+
+
 def process_csv(csv_text: str, accept_changes: bool = False) -> dict:
     """
     Run the pipeline end to end.
@@ -750,6 +913,7 @@ def process_csv(csv_text: str, accept_changes: bool = False) -> dict:
         }
 
     leads_in = len(df)
+    source_contacts = snapshot_email_phone(df.to_dict("records"))
     df_valid, issue_count = validate_dataframe(df)
     df_norm, norm_count = normalize_dataframe(df_valid)
     df_norm = df_norm.copy()
@@ -799,6 +963,22 @@ def process_csv(csv_text: str, accept_changes: bool = False) -> dict:
         if col in df_out.columns:
             df_out[col] = df_out[col].map(strip_excel_artifacts)
 
+    df_out, quarantine = _quarantine_unwritable_rows(df_out, source_cols)
+    if quarantine["ids"] and df_out.empty:
+        # Holding back one dirty lead is normal. Holding back every lead means a
+        # transformation broke, not that the data is dirty, so nothing is
+        # written and the run says so instead of shipping an empty file.
+        reasons = sorted(quarantine["reason_counts"])
+        return {
+            "status": "error",
+            "message": (
+                "Output blocked by invariant checks: every row failed a "
+                "row-level check, which points at the pipeline rather than the "
+                "data: " + "; ".join(reasons)
+            ),
+            "invariant_violations": reasons,
+        }
+
     blank_email_count = (
         int(df_out["Email"].astype(str).str.strip().isin(["", "nan"]).sum())
         if "Email" in df_out.columns else 0
@@ -817,8 +997,13 @@ def process_csv(csv_text: str, accept_changes: bool = False) -> dict:
         input_ids=input_ids,
         merge_log=merge_log,
         dropped_test_ids=dropped_test_ids,
+        quarantined_ids=quarantine["ids"],
+        source_contacts=source_contacts,
     )
     if violations:
+        # Whatever survives the per-row hold is batch-shaped: a lead vanished,
+        # the row count grew, duplicate emails survived. Those mean the
+        # pipeline misbehaved, so the run still writes nothing.
         return {
             "status": "error",
             "message": "Output blocked by invariant checks: " + "; ".join(violations),
@@ -871,6 +1056,7 @@ def process_csv(csv_text: str, accept_changes: bool = False) -> dict:
         "phone_states": _phone_state_counts(df_out),
         "field_diffs": field_diffs,
         "field_diff_lines": format_changes(field_changes),
+        "quarantine": quarantine,
     }
     summary = _build_run_summary(df, writable, merge_log, audit_rows, counts)
 
@@ -881,6 +1067,8 @@ def process_csv(csv_text: str, accept_changes: bool = False) -> dict:
         "excel_file": "deduped_excel_review.csv",
         "audit_csv": audit_csv,
         "audit_file": "dedup_log.csv",
+        "review_csv": quarantine["csv"],
+        "review_file": REVIEW_FILE,
         "leads_in": leads_in,
         "validation_issues": issue_count,
         "values_normalized": norm_count,
@@ -889,6 +1077,8 @@ def process_csv(csv_text: str, accept_changes: bool = False) -> dict:
         "blank_email_kept": blank_email_count,
         "hitl_records": hitl_records,
         "records_dropped": dropped_count,
+        "rows_held_for_review": len(quarantine["ids"]),
+        "quarantine": quarantine,
         "invariant_violations": [],
         "field_diffs": field_diffs,
         "expected_headers": [_export_header(col) for col in source_cols],
@@ -897,17 +1087,242 @@ def process_csv(csv_text: str, accept_changes: bool = False) -> dict:
     }
 
 
-async def run_dedup_pipeline(csv_text: str, tool_context: ToolContext) -> dict:
+def _sort_for_chunking(df: pd.DataFrame) -> pd.DataFrame:
+    """Put matching emails next to each other so a 200-row slice can still merge them."""
+    keys = []
+    extra = pd.DataFrame(index=df.index)
+    if "Email" in df.columns:
+        extra["_chunk_email"] = df["Email"].map(lambda value: cell(value).lower())
+        keys.append("_chunk_email")
+    if "Company" in df.columns:
+        extra["_chunk_company"] = df["Company"].map(lambda value: cell(value).lower())
+        keys.append("_chunk_company")
+    if "Id" in df.columns:
+        extra["_chunk_id"] = df["Id"].map(cell)
+        keys.append("_chunk_id")
+    if not keys:
+        return df
+    return df.join(extra).sort_values(keys, kind="stable").drop(columns=keys)
+
+
+def _concat_csv_documents(texts: list) -> str:
+    if not texts:
+        return ""
+    chunks = []
+    for index, text in enumerate(texts):
+        body = (text or "").lstrip("\ufeff")
+        if index == 0:
+            chunks.append(body.rstrip("\n"))
+            continue
+        lines = body.splitlines()
+        if len(lines) <= 1:
+            continue
+        chunks.append("\n".join(lines[1:]))
+    return "\n".join(chunks) + "\n"
+
+
+def _combine_chunk_results(parts: list, rows_in: int) -> dict:
+    columns = None
+    frames = []
+    for part in parts:
+        frame = pd.read_csv(io.StringIO(part["csv"]), dtype=str, keep_default_na=False)
+        if columns is None:
+            columns = list(frame.columns)
+        frames.append(frame.reindex(columns=columns).fillna(""))
+    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    csv_text_out = _write_salesforce_csv(combined, columns)
+    excel_csv = _write_excel_safe_csv(combined, columns)
+    audit_csv = _concat_csv_documents([part["audit_csv"] for part in parts])
+
+    def _sum(key):
+        return sum(part.get(key, 0) or 0 for part in parts)
+
+    phone_states = {}
+    flag_counts = {}
+    technical_log = []
+    merges, merge_lines, dropped, hitl, directory = [], [], [], [], []
+    critical_lines, field_diffs, field_diff_lines = [], [], []
+    chunk_lines = []
+    for index, part in enumerate(parts, start=1):
+        summary = part.get("summary") or {}
+        totals = summary.get("totals") or {}
+        tech = summary.get("technical_log") or []
+        technical_log.extend(tech)
+        merges.extend(summary.get("merges") or [])
+        merge_lines.extend(summary.get("merge_lines") or [])
+        dropped.extend(summary.get("dropped") or [])
+        hitl.extend(summary.get("hitl") or [])
+        directory.extend(summary.get("directory") or [])
+        critical_lines.extend(summary.get("critical_lines") or [])
+        field_diffs.extend(summary.get("field_diffs") or [])
+        field_diff_lines.extend(summary.get("field_diff_lines") or [])
+        for state, count in (summary.get("phone_states") or {}).items():
+            phone_states[state] = phone_states.get(state, 0) + count
+        for flag, count in (summary.get("flag_counts") or {}).items():
+            flag_counts[flag] = flag_counts.get(flag, 0) + count
+        held = len((part.get("quarantine") or {}).get("ids") or [])
+        chunk_lines.append(
+            f"Batch {index}/{len(parts)}: {totals.get('leads_in', part['leads_in'])} in, "
+            f"{totals.get('leads_out', part['leads_out'])} out, "
+            f"{totals.get('duplicates_merged', part['duplicates_merged'])} merged, "
+            f"{totals.get('records_dropped', part['records_dropped'])} dropped, "
+            f"{totals.get('hitl_records', part['hitl_records'])} HITL, "
+            f"{held} held for review, "
+            f"{len(tech)} log lines."
+        )
+
+    quarantine = _merge_quarantines(parts)
+    chunk_note = (
+        f"Processed in {len(parts)} batches of {CHUNK_SIZE} rows (sorted by email). "
+        "Duplicates that still sit in different batches were not merged. "
+        "Per-lead change reasons are in dedup_log.csv."
+    )
+    counts = {
+        "leads_in": rows_in,
+        "leads_out": len(combined),
+        "validation_issues": _sum("validation_issues"),
+        "values_normalized": _sum("values_normalized"),
+        "duplicates_merged": _sum("duplicates_merged"),
+        "records_dropped": _sum("records_dropped"),
+        "hitl_records": _sum("hitl_records"),
+        "blank_email_kept": _sum("blank_email_kept"),
+        "technical_log": technical_log,
+        "phone_states": phone_states,
+        "field_diffs": field_diffs,
+        "field_diff_lines": field_diff_lines,
+        "quarantine": quarantine,
+    }
+    first_files = [
+        entry for entry in ((parts[0].get("summary") or {}).get("files") or [])
+        if not entry.startswith(REVIEW_FILE)
+    ]
+    if quarantine["ids"]:
+        first_files = first_files + [
+            f"{REVIEW_FILE} — {len(quarantine['ids'])} row(s) held back from the "
+            "write-back with the reason attached"
+        ]
+    summary = {
+        "totals": {
+            "leads_in": counts["leads_in"],
+            "leads_out": counts["leads_out"],
+            "validation_issues": counts["validation_issues"],
+            "values_normalized": counts["values_normalized"],
+            "duplicates_merged": counts["duplicates_merged"],
+            "records_dropped": counts["records_dropped"],
+            "hitl_records": counts["hitl_records"],
+            "blank_email_kept": counts["blank_email_kept"],
+            "rows_held_for_review": len(quarantine["ids"]),
+        },
+        "files": first_files,
+        "merges": merges,
+        "merge_lines": merge_lines,
+        "dropped": dropped,
+        "hitl": hitl,
+        "directory": directory,
+        "critical_lines": critical_lines,
+        "routine_cleanup": "",
+        "flag_counts": flag_counts,
+        "technical_log": technical_log,
+        "phone_states": phone_states,
+        "field_diffs": field_diffs,
+        "field_diff_lines": field_diff_lines,
+        "held_for_review": quarantine["rows"],
+        "held_for_review_lines": quarantine["lines"],
+        "held_for_review_reasons": quarantine["reason_counts"],
+        "chunk_count": len(parts),
+        "chunk_size": CHUNK_SIZE,
+        "chunk_note": chunk_note,
+        "chunk_lines": chunk_lines,
+    }
+    return {
+        "status": "ok",
+        "csv": csv_text_out,
+        "excel_csv": excel_csv,
+        "excel_file": parts[0]["excel_file"],
+        "audit_csv": audit_csv,
+        "audit_file": parts[0]["audit_file"],
+        "review_csv": quarantine["csv"],
+        "review_file": REVIEW_FILE,
+        "rows_held_for_review": len(quarantine["ids"]),
+        "quarantine": quarantine,
+        "leads_in": counts["leads_in"],
+        "validation_issues": counts["validation_issues"],
+        "values_normalized": counts["values_normalized"],
+        "duplicates_merged": counts["duplicates_merged"],
+        "leads_out": counts["leads_out"],
+        "blank_email_kept": counts["blank_email_kept"],
+        "hitl_records": counts["hitl_records"],
+        "records_dropped": counts["records_dropped"],
+        "invariant_violations": [],
+        "field_diffs": field_diffs,
+        "expected_headers": parts[0].get("expected_headers") or [_export_header(col) for col in columns],
+        "file": parts[0]["file"],
+        "summary": summary,
+    }
+
+
+def process_csv_for_agent(csv_text: str) -> dict:
+    """
+    Agent entry: same pipeline as process_csv, but files over CHUNK_SIZE rows
+    are sorted by email and run in batches of CHUNK_SIZE, then stitched.
+    """
+    if len(csv_text) > MAX_CSV_CHARS:
+        return process_csv(csv_text)
+    try:
+        df = pd.read_csv(io.StringIO(csv_text), dtype=str, keep_default_na=False)
+    except Exception:
+        return process_csv(csv_text)
+    df = _clean_columns(df)
+    if "Email" not in df.columns or len(df) <= CHUNK_SIZE or len(df) > MAX_ROWS:
+        return process_csv(csv_text)
+
+    df = _sort_for_chunking(df)
+    parts = []
+    for index, start in enumerate(range(0, len(df), CHUNK_SIZE)):
+        chunk = df.iloc[start:start + CHUNK_SIZE]
+        chunk_csv = _write_salesforce_csv(chunk, list(chunk.columns))
+        result = process_csv(chunk_csv)
+        if result["status"] != "ok":
+            prefix = (
+                f"Batch {index + 1} (rows {start + 1}-"
+                f"{start + len(chunk)} of {len(df)}): "
+            )
+            result = dict(result)
+            result["message"] = prefix + (result.get("message") or "batch failed")
+            return result
+        parts.append(result)
+    return _combine_chunk_results(parts, rows_in=len(df))
+
+
+async def run_dedup_pipeline(
+    csv_text: str = "",
+    filename: str = "",
+    tool_context: ToolContext = None,
+) -> dict:
     """
     Validates leads, normalizes fields from the reference taxonomy,
     then deduplicates by exact email and by same-person name plus
     domain or company. Keeps one surviving row per group.
 
+    Pass filename when the chat shows an uploaded file, for example
+    filename="leads.csv", and leave csv_text empty. This tool reads that
+    file itself. Never copy CSV rows into csv_text for an uploaded file:
+    the rows do not need to pass through the reply, and a large paste
+    fails before this tool runs. Use csv_text only for a handful of rows
+    typed directly into the chat.
+
     Saves deduped.csv and dedup_log.csv as artifacts. Returns counts plus a
     structured summary of every merge, drop, review flag, and field change
     so the agent can narrate the run and answer follow-up questions.
+
+    Files larger than CHUNK_SIZE rows are sorted by email and processed in
+    batches of CHUNK_SIZE, then written back as one combined file.
     """
-    result = process_csv(csv_text)
+    source = await _resolve_dedup_csv(csv_text, filename, tool_context)
+    if source["status"] != "ok":
+        return source
+
+    result = process_csv_for_agent(source["csv_text"])
     if result["status"] != "ok":
         field_diffs = result.get("field_diffs") or []
         if field_diffs:
@@ -929,6 +1344,7 @@ async def run_dedup_pipeline(csv_text: str, tool_context: ToolContext) -> dict:
 
     tool_context.state["leads_in"] = result["leads_in"]
     tool_context.state["leads_out"] = result["leads_out"]
+    tool_context.state["source_file"] = source["source"]
     tool_context.state["last_summary"] = summary
     tool_context.state["last_audit"] = list(csv.DictReader(io.StringIO(result["audit_csv"])))
 
@@ -942,10 +1358,14 @@ async def run_dedup_pipeline(csv_text: str, tool_context: ToolContext) -> dict:
         "leads_out": result["leads_out"],
         "blank_email_kept": result["blank_email_kept"],
         "hitl_records": result["hitl_records"],
+        "rows_held_for_review": result.get("rows_held_for_review", 0),
         "file": result["file"],
         "audit_file": result["audit_file"],
+        "source_file": source["source"],
         "summary": _agent_facing_summary(summary),
     }
+    if result.get("rows_held_for_review"):
+        payload["review_file"] = result["review_file"]
 
     try:
         csv_bytes = result["csv"].encode("utf-8")
@@ -975,6 +1395,14 @@ async def run_dedup_pipeline(csv_text: str, tool_context: ToolContext) -> dict:
         await tool_context.save_artifact(
             filename=result["excel_file"], artifact=review_part
         )
+        if result.get("review_csv"):
+            held_part = types.Part.from_bytes(
+                data=result["review_csv"].encode("utf-8"),
+                mime_type="text/csv; charset=utf-8",
+            )
+            await tool_context.save_artifact(
+                filename=result["review_file"], artifact=held_part
+            )
         tool_context.state["deduped_csv_ready"] = True
         return payload
     except Exception:
@@ -991,6 +1419,16 @@ def require_deduped_csv(state) -> dict:
     return {"status": "error", "message": ENRICH_REQUIRES_DEDUP_MESSAGE}
 
 
+def _decode_csv_bytes(data: bytes) -> str:
+    """Spreadsheet exports arrive as UTF-8 with or without a BOM, or as Latin-1."""
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 def _part_to_text(part) -> str:
     if part is None:
         return ""
@@ -998,10 +1436,65 @@ def _part_to_text(part) -> str:
     if inline is not None:
         data = getattr(inline, "data", b"")
         if isinstance(data, bytes):
-            return data.decode("utf-8")
+            return _decode_csv_bytes(data)
         return str(data)
     text = getattr(part, "text", None)
     return text or ""
+
+
+async def _load_artifact_text(tool_context: ToolContext, filename: str) -> str:
+    try:
+        part = await tool_context.load_artifact(filename=filename)
+    except TypeError:
+        try:
+            part = await tool_context.load_artifact(filename)
+        except Exception:
+            part = None
+    except Exception:
+        part = None
+    return _part_to_text(part)
+
+
+async def _uploaded_artifact_names(tool_context: ToolContext) -> list:
+    """Session artifacts that came from the user, oldest first."""
+    try:
+        names = await tool_context.list_artifacts()
+    except Exception:
+        return []
+    uploads = [name for name in (names or []) if name not in GENERATED_ARTIFACTS]
+    csvs = [name for name in uploads if name.lower().endswith(".csv")]
+    return csvs or uploads
+
+
+async def _resolve_dedup_csv(csv_text: str, filename: str, tool_context) -> dict:
+    """
+    Decide where the lead rows come from.
+
+    Reading the upload from an artifact keeps the rows out of the model's
+    function-call arguments. A model that has to retype a large CSV into
+    csv_text runs past its output cap and Gemini returns
+    MALFORMED_FUNCTION_CALL before this tool is ever invoked.
+    """
+    name = (filename or "").strip().strip('"').strip("'")
+    if name:
+        loaded = await _load_artifact_text(tool_context, name)
+        if loaded.strip():
+            return {"status": "ok", "csv_text": loaded, "source": name}
+        available = await _uploaded_artifact_names(tool_context)
+        hint = f" Files in this session: {', '.join(available)}." if available else ""
+        return {
+            "status": "error",
+            "message": f"Uploaded file '{name}' was not found in this session.{hint}",
+        }
+
+    if (csv_text or "").strip():
+        return {"status": "ok", "csv_text": csv_text, "source": "inline"}
+
+    for candidate in reversed(await _uploaded_artifact_names(tool_context)):
+        loaded = await _load_artifact_text(tool_context, candidate)
+        if loaded.strip():
+            return {"status": "ok", "csv_text": loaded, "source": candidate}
+    return {"status": "error", "message": NO_UPLOAD_MESSAGE}
 
 
 async def _load_deduped_csv(tool_context: ToolContext) -> dict:
@@ -1051,6 +1544,58 @@ def _parse_lead_csv(csv_text: str) -> dict:
     return {"status": "ok", "df": df}
 
 
+def _attach_hygiene_audit(df: pd.DataFrame, audit_rows) -> pd.DataFrame:
+    """Join email_status / Email_raw from dedup_log so enrich can replace MX misses."""
+    by_id = {}
+    for row in audit_rows or []:
+        lead_id = cell(row.get("surviving_lead_id", ""))
+        if lead_id:
+            by_id[lead_id] = row
+    if not by_id:
+        return df
+    df = df.copy()
+    if "email_status" not in df.columns:
+        df["email_status"] = ""
+    if "Email_raw" not in df.columns:
+        df["Email_raw"] = ""
+    for idx, record in df.iterrows():
+        entry = by_id.get(cell(record.get("Id", "")))
+        if not entry:
+            continue
+        if not cell(df.at[idx, "email_status"]):
+            df.at[idx, "email_status"] = cell(entry.get("email_status", ""))
+        if not cell(df.at[idx, "Email_raw"]):
+            df.at[idx, "Email_raw"] = cell(entry.get("email_raw", ""))
+    return df
+
+
+def _enrichment_review_csv(reviews) -> str:
+    if not reviews:
+        return ""
+    rows = []
+    for item in reviews:
+        rows.append({
+            "Id": item.get("id", ""),
+            "Email": item.get("email", ""),
+            "email_raw": item.get("email_raw", ""),
+            "Company": item.get("company", ""),
+            "Website": item.get("website", ""),
+            "needs_review_reason": "; ".join(item.get("reasons") or []),
+        })
+    frame = pd.DataFrame(rows)
+    return _write_salesforce_csv(frame, list(frame.columns))
+
+
+def _enrichment_review_lines(reviews) -> list:
+    lines = []
+    for item in reviews or []:
+        lead_id = item.get("id") or ""
+        reasons = "; ".join(item.get("reasons") or [])
+        if lead_id or reasons:
+            lines.append(f"{lead_id} — {reasons}")
+    return lines
+
+
 async def search_and_enrich(csv_text: str, tool_context: ToolContext) -> dict:
     """
     Enrich missing lead CSV fields with Lusha Search and Enrich.
@@ -1061,11 +1606,16 @@ async def search_and_enrich(csv_text: str, tool_context: ToolContext) -> dict:
 
     Uses POST https://api.lusha.com/v3/contacts/search-and-enrich (up to 100
     contacts per request). Looks up each row by email, or by firstName +
-    lastName + companyName/companyDomain. Reveals emails and phones only when
-    those CSV cells are blank. Fills blank FirstName, LastName, Email, Company,
-    Title, Phone, Industry, Website, AnnualRevenue, and NumberOfEmployees.
-    Existing values are never overwritten.
-    LeadSource, Status, CreatedDate, and OwnerId are left unchanged.
+    lastName + companyName/companyDomain. Reveals phones only when Phone is
+    blank. Reveals emails when Email is blank or hygiene marked it not
+    deliverable. A Lusha email is written only when its host matches Company
+    or the row's website/email domain. Unvalidated emails with no trusted
+    replacement are blanked and listed in enrichment_review.csv. Existing
+    Phone values are never replaced. Website fills require a plausible,
+    company-aligned host. AnnualRevenue is filled only from an exact
+    provider figure; a revenueRange min/max bucket is returned in stats as
+    revenue_ranges and is never written to the CSV. LeadSource, Status,
+    CreatedDate, and OwnerId are left unchanged.
 
     Pass an empty string for csv_text. Returns counts only; the write-back
     file is saved as enriched.csv.
@@ -1082,14 +1632,34 @@ async def search_and_enrich(csv_text: str, tool_context: ToolContext) -> dict:
         return parsed
 
     df = parsed["df"].fillna("")
+    source_cols = list(df.columns)
     leads_in = len(df)
+    before = snapshot_email_phone(df.to_dict("records"))
+    df = _attach_hygiene_audit(df, tool_context.state.get("last_audit"))
     df_enriched, stats = enrich_dataframe(df)
     if stats.get("error"):
         return {"status": "error", "message": stats["error"]}
 
     df_enriched = df_enriched.fillna("")
+    preserve_violations = check_enrich_preservation(
+        before,
+        df_enriched.to_dict("records"),
+        allowed_email_blank_ids=stats.get("email_blanked_no_replacement_ids"),
+    )
+    if preserve_violations:
+        return {
+            "status": "error",
+            "message": "Output blocked by invariant checks: "
+            + "; ".join(preserve_violations),
+            "invariant_violations": preserve_violations,
+        }
+    writable = df_enriched.reindex(columns=source_cols).fillna("")
     output = io.StringIO()
-    df_enriched.to_csv(output, index=False)
+    writable.to_csv(output, index=False)
+
+    review_rows = stats.get("enrichment_review") or []
+    review_csv = _enrichment_review_csv(review_rows)
+    review_lines = _enrichment_review_lines(review_rows)
 
     payload = {
         "status": "ok",
@@ -1100,6 +1670,14 @@ async def search_and_enrich(csv_text: str, tool_context: ToolContext) -> dict:
         "rows_skipped": stats["rows_skipped"],
         "fields_filled": stats["fields_filled"],
         "credits_charged": stats["credits_charged"],
+        "emails_rejected": stats.get("emails_rejected", 0),
+        "websites_rejected": stats.get("websites_rejected", 0),
+        "emails_blanked_no_replacement": len(
+            stats.get("email_blanked_no_replacement_ids") or []
+        ),
+        "revenue_range_rows": len(stats.get("revenue_ranges") or []),
+        "revenue_ranges": stats.get("revenue_ranges") or [],
+        "enrichment_review_lines": review_lines,
         "file": "enriched.csv",
     }
     tool_context.state["fields_filled"] = stats["fields_filled"]
@@ -1113,6 +1691,14 @@ async def search_and_enrich(csv_text: str, tool_context: ToolContext) -> dict:
             filename="enriched.csv", artifact=csv_part
         )
         payload["artifact_version"] = version
+        if review_csv:
+            review_part = types.Part.from_bytes(
+                data=review_csv.encode("utf-8"), mime_type="text/csv"
+            )
+            await tool_context.save_artifact(
+                filename=ENRICH_REVIEW_FILE, artifact=review_part
+            )
+            payload["review_file"] = ENRICH_REVIEW_FILE
         return payload
     except Exception:
         return {

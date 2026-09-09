@@ -84,9 +84,13 @@ class DomainTokenRules(unittest.TestCase):
 
 
 class GeneralCasingRules(unittest.TestCase):
-    def test_short_all_caps_tokens_stay_acronyms(self):
-        self.assertEqual(normalize_company_casing("BFG"), "BFG")
-        self.assertEqual(normalize_company_casing("bfg"), "BFG")
+    def test_four_and_five_letter_all_caps_tokens_stay_acronyms(self):
+        self.assertEqual(normalize_company_casing("SANS Institute"), "SANS Institute")
+        self.assertEqual(normalize_company_casing("IBEX Group"), "IBEX Group")
+
+    def test_mixed_case_brands_are_not_title_cased(self):
+        self.assertEqual(normalize_company_casing("eClerx"), "eClerx")
+        self.assertEqual(normalize_company_casing("runZero Security"), "runZero Security")
 
     def test_ampersand_initialisms_are_joined(self):
         for raw in ("l&t construction", "L and T Construction", "l & t construction"):

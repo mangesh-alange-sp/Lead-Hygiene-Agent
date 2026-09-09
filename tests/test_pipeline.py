@@ -38,6 +38,7 @@ class SchemaTests(unittest.TestCase):
         internal = {
             "merged_from_ids", "match_signals_used", "confidence_score",
             "data_quality_flags", "hitl_review", "decision",
+            "Email_raw", "email_status", "Phone_raw", "PhoneExtension",
         }
         self.assertTrue(internal.isdisjoint(out.columns))
         self.assertNotIn("merged_from_ids", result["csv"].splitlines()[0])
@@ -49,6 +50,8 @@ class SchemaTests(unittest.TestCase):
         self.assertIn("merged_from_ids", audit[0])
         self.assertIn("match_signals_used", audit[0])
         self.assertIn("match_reason", audit[0])
+        self.assertIn("email_status", audit[0])
+        self.assertIn("email_raw", audit[0])
         self.assertEqual(result["audit_file"], "dedup_log.csv")
 
     def test_csv_export_hygiene(self):
@@ -93,6 +96,9 @@ class BatchInvariantTests(unittest.TestCase):
                 self.assertFalse(bool(phone) and phone[0] in "+=-@", row.get("Id"))
 
     def test_invariant_gate_blocks_a_broken_transformation(self):
+        # A transformation that corrupts every row is a pipeline fault, not
+        # dirty data, so it must still write nothing rather than hold back the
+        # whole file and look like a successful empty run.
         from unittest.mock import patch
 
         with patch("pipeline.tools.strip_excel_artifacts", lambda value: "'" + str(value)):

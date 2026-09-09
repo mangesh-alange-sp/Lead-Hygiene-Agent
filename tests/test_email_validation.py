@@ -5,6 +5,8 @@ The suite answers deliverability from data/mx_cache.json (see tests/__init__.py)
 so results are deterministic and do not depend on DNS.
 """
 
+import csv
+import io
 import unittest
 
 import pandas as pd
@@ -40,13 +42,21 @@ class SyntaxRules(unittest.TestCase):
 
 
 class DeliverabilityRules(unittest.TestCase):
-    def test_domains_with_no_mail_exchanger_are_cleared(self):
+    def test_placeholder_domains_are_still_cleared(self):
         for raw in ("willy@wonka.com", "potter@stinks.com"):
             with self.subTest(raw=raw):
                 result = validate_lead_email(raw)
                 self.assertEqual(result["status"], UNDELIVERABLE)
                 self.assertEqual(result["value"], "")
-                self.assertIn("MX", result["reason"])
+                self.assertIn("placeholder", result["reason"])
+
+    def test_mx_miss_keeps_a_syntactically_valid_address(self):
+        # sprinklr.com.sg is cached as having no MX, and is not a placeholder.
+        result = validate_lead_email("pat@sprinklr.com.sg")
+        self.assertEqual(result["status"], UNDELIVERABLE)
+        self.assertEqual(result["value"], "pat@sprinklr.com.sg")
+        self.assertIn("kept", result["reason"])
+        self.assertEqual(result["raw"], "pat@sprinklr.com.sg")
 
     def test_real_corporate_domains_pass(self):
         for raw in ("jane@amazon.com", "mehmet.arikan@sap.com", "gokul.s@yahoo.in"):
@@ -80,27 +90,46 @@ class DeliverabilityRules(unittest.TestCase):
 
 
 class LeadRecordRules(unittest.TestCase):
-    def test_undeliverable_email_is_nulled_but_the_lead_survives(self):
+    def test_placeholder_email_is_nulled_but_the_lead_survives(self):
         df = pd.DataFrame({
             "Id": ["00Q1"], "FirstName": ["Willy"], "LastName": ["Wonka"],
             "Email": ["willy@wonka.com"], "Phone": ["3125550199"], "Company": ["Bfg"],
         })
         out, _ = validate_dataframe(df)
         self.assertEqual(out.at[0, "Email"], "")
+        self.assertEqual(out.at[0, "Email_raw"], "willy@wonka.com")
         self.assertEqual(out.at[0, "email_status"], UNDELIVERABLE)
         self.assertIn("undeliverable_email", out.at[0, "data_quality_flags"])
         self.assertEqual(out.at[0, "FirstName"], "Willy")
 
-    def test_end_to_end_keeps_the_lead_and_logs_the_reason(self):
+    def test_mx_miss_keeps_the_email_on_the_row(self):
+        df = pd.DataFrame({
+            "Id": ["00Q1"], "FirstName": ["Pat"], "LastName": ["Lee"],
+            "Email": ["Pat@Sprinklr.com.sg"], "Phone": ["4155550100"],
+            "Company": ["Sprinklr"],
+        })
+        out, _ = validate_dataframe(df)
+        self.assertEqual(out.at[0, "Email"], "pat@sprinklr.com.sg")
+        self.assertEqual(out.at[0, "Email_raw"], "Pat@Sprinklr.com.sg")
+        self.assertEqual(out.at[0, "email_status"], UNDELIVERABLE)
+        self.assertIn("undeliverable_email", out.at[0, "data_quality_flags"])
+        self.assertEqual(out.at[0, "hitl_review"], "Yes")
+
+    def test_end_to_end_keeps_the_mx_miss_and_logs_the_reason(self):
         csv_in = (
             "Id,FirstName,LastName,Email,Phone,Company,Country\n"
-            "00Q1,Willy,Wonka,willy@wonka.com,3125550199,Bfg,US\n"
+            "00Q1,Pat,Lee,pat@sprinklr.com.sg,4155550100,Sprinklr,US\n"
         )
         result = process_csv(csv_in)
         self.assertEqual(result["status"], "ok", result.get("message"))
-        self.assertIn("00Q1", result["csv"])
-        reasons = " ".join(row["reasons"] for row in result["summary"]["technical_log"])
+        row = next(csv.DictReader(io.StringIO(result["csv"])))
+        self.assertEqual(row["Email"], "pat@sprinklr.com.sg")
+        audit = {r["surviving_lead_id"]: r for r in csv.DictReader(io.StringIO(result["audit_csv"]))}
+        self.assertEqual(audit["00Q1"]["email_status"], UNDELIVERABLE)
+        self.assertEqual(audit["00Q1"]["email_raw"], "pat@sprinklr.com.sg")
+        reasons = " ".join(entry["reasons"] for entry in result["summary"]["technical_log"])
         self.assertIn("email:", reasons)
+        self.assertIn("kept", reasons)
 
     def test_a_bad_email_alone_never_drops_the_record(self):
         csv_in = (

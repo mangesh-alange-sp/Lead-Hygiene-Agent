@@ -18,7 +18,7 @@ import pandas as pd
 import pandera.pandas as pa
 from pandera.errors import SchemaError, SchemaErrors
 
-from .phone import STATUS_NEEDS_REVIEW, STATUS_VALID
+from .phone import STATUS_NEEDS_REVIEW, STATUS_VALID, split_phone_extension
 
 WEBSITE_RE = r"^https?://"
 E164_RE = r"^\+\d"
@@ -106,7 +106,11 @@ def check_phone_states(df: pd.DataFrame) -> list:
     # an input that already carried +CC and then failed validation is preserved
     # verbatim, so it legitimately looks like E.164 while being needs_review.
     if "Phone_raw" in df.columns:
-        submitted = df["Phone_raw"].fillna("").astype(str).map(_digits)
+        def _submitted_digits(value):
+            base, _extension = split_phone_extension(value)
+            return _digits(base)
+
+        submitted = df["Phone_raw"].fillna("").astype(str).map(_submitted_digits)
         kept = phone.map(_digits)
         violations += describe(
             has_phone

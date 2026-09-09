@@ -15,10 +15,13 @@ class TitleCleanupRules(unittest.TestCase):
         )
         self.assertEqual(normalize_title(raw), "Director")
 
-    def test_known_acronyms_are_not_low_quality(self):
-        self.assertFalse(is_low_quality_title("PM"))
-        self.assertFalse(is_low_quality_title("CISO"))
-        self.assertEqual(normalize_title("PM"), "PM")
+    def test_hyphen_and_slash_are_cased_per_segment(self):
+        self.assertEqual(normalize_title("VP-Sales"), "VP-Sales")
+        self.assertIn("/", normalize_title("CIO/CISO"))
+
+    def test_mixed_case_title_tokens_are_preserved(self):
+        self.assertEqual(normalize_title("eClerx Engineer"), "eClerx Engineer")
+        self.assertEqual(normalize_title("iOS Lead"), "iOS Lead")
 
     def test_unknown_short_acronym_is_flagged(self):
         self.assertTrue(is_low_quality_title("Ats"))

@@ -47,6 +47,22 @@ def strip_legal_suffixes(folded: str) -> str:
     return re.sub(r"\s+", " ", LEGAL_SUFFIX_RE.sub("", folded or "")).strip()
 
 
+def is_preserved_mixed_case(token: str) -> bool:
+    """
+    True for brands whose shape is not Title Case, e.g. eClerx, runZero, iPhone.
+
+    All-caps, all-lower, and 'Acme' are not mixed in this sense: those still
+    go through the acronym or title-case paths.
+    """
+    if not token or not any(ch.isalpha() for ch in token):
+        return False
+    letters = [ch for ch in token if ch.isalpha()]
+    if not (any(ch.islower() for ch in letters) and any(ch.isupper() for ch in letters)):
+        return False
+    alpha = "".join(letters)
+    return not (alpha[0].isupper() and alpha[1:].islower())
+
+
 def is_domain_like(token: str) -> bool:
     """'Amazon.com' and 'siemens.de' are domain-like; 'R.O.C' and 'B.V.' are not."""
     from .domains import is_plausible_domain
@@ -100,10 +116,13 @@ def case_company_token(token: str) -> str:
         labels = [part[:1].upper() + part[1:].lower() for part in bare.split(".")]
         return leading + ".".join(labels) + trailing
 
-    # Short all-caps / vowelless tokens are acronyms (BFG, NCI), not "Bfg".
-    if bare.isalpha() and 2 <= len(bare) <= 3 and bare.lower() not in SMALL_WORDS:
+    # 2–5 letter ALLCAPS (or vowelless) tokens are acronyms: SANS, IBEX, BFG.
+    if bare.isalpha() and 2 <= len(bare) <= 5 and bare.lower() not in SMALL_WORDS:
         if bare.isupper() or not re.search(r"[aeiou]", bare, re.I):
             return leading + bare.upper() + trailing
+
+    if is_preserved_mixed_case(bare):
+        return leading + bare + trailing
 
     titled = bare[:1].upper() + bare[1:].lower()
     titled = re.sub(r"\bMc([a-z])", lambda m: "Mc" + m.group(1).upper(), titled)

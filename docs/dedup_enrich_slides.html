@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Lead Hygiene — Deduplication &amp; Enrichment</title>
+<style>
+  :root {
+    --cyan-left: #8CFFFF;
+    --cyan-right: #53C0E7;
+    --blue: #1B47A8;
+    --magenta-dark: #EC08BA;
+    --magenta-light: #F726DF;
+    --title-pink: #C871B6;
+    --ink: #14213D;
+    --ink-soft: #5A6478;
+    --hair: #E2E6EF;
+    --tint: #F6F8FC;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: #6B7280;
+    font-family: "Inter", "Helvetica Neue", Arial, sans-serif;
+    color: var(--ink);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 32px;
+    padding: 32px 0;
+  }
+
+  .slide {
+    position: relative;
+    width: 1280px;
+    height: 720px;
+    background: #FFFFFF;
+    overflow: hidden;
+  }
+
+  /* ---- themed header band ---- */
+  .band { position: absolute; inset: 0 0 auto 0; height: 75px; }
+  .band > i { position: absolute; top: 0; left: 0; width: 100%; height: 75px; display: block; }
+
+  .band-cyan-l { background: var(--cyan-left); clip-path: polygon(0 0, 219px 0, 119px 100%, 0 100%); }
+  .band-blue-l { background: var(--blue); clip-path: polygon(219px 0, 238px 0, 463px 100%, 119px 100%); }
+  .band-magenta {
+    background: repeating-linear-gradient(90deg, var(--magenta-dark) 0 6px, var(--magenta-light) 6px 13px);
+    clip-path: polygon(238px 0, 938px 0, 938px 100%, 463px 100%);
+  }
+  .band-cyan-r { background: var(--cyan-right); clip-path: polygon(938px 0, 1280px 0, 1280px 100%, 938px 100%); }
+  .band-blue-r { background: var(--blue); clip-path: polygon(1262px 0, 1280px 0, 1280px 100%, 1169px 100%); }
+
+  .title-plate {
+    position: absolute;
+    top: 11px;
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 282px;
+    padding: 9px 26px;
+    background: #FFFFFF;
+    text-align: center;
+    z-index: 2;
+  }
+  .title-plate h1 {
+    margin: 0;
+    font-size: 27px;
+    line-height: 1.1;
+    font-weight: 700;
+    letter-spacing: -0.2px;
+    color: var(--title-pink);
+    white-space: nowrap;
+  }
+
+  /* ---- body ---- */
+  .body { position: absolute; top: 75px; left: 0; right: 0; bottom: 0; padding: 30px 56px 26px; }
+
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 22px; }
+  .kpis.three { grid-template-columns: repeat(3, 1fr); }
+  .kpis.five { grid-template-columns: repeat(5, 1fr); gap: 13px; }
+  .kpis.five .kpi { padding: 13px 14px; }
+  .kpis.five .v { font-size: 25px; }
+  .kpi { border: 1px solid var(--hair); border-left: 4px solid var(--cyan-right); padding: 13px 18px; }
+  .kpi .v { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; }
+  .kpi .l { font-size: 12.5px; color: var(--ink-soft); margin-top: 3px; }
+  .kpi.mag { border-left-color: var(--magenta-dark); }
+  .kpi.blu { border-left-color: var(--blue); }
+
+  .cols { display: grid; grid-template-columns: 1.15fr 1fr; gap: 44px; }
+  .cols.even { grid-template-columns: 1fr 1fr; }
+
+  h2 {
+    margin: 0 0 11px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1.1px;
+    text-transform: uppercase;
+    color: var(--blue);
+  }
+
+  .bar-row { margin-bottom: 15px; }
+  .bar-head { display: flex; justify-content: space-between; font-size: 13.5px; margin-bottom: 5px; }
+  .bar-head span:last-child { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+  .track { height: 14px; background: var(--tint); }
+  .fill { height: 100%; }
+  .fill.mag { background: var(--magenta-dark); }
+  .fill.blu { background: var(--blue); }
+  .fill.cy { background: var(--cyan-right); }
+  .fill.pale { background: #C3CBDC; }
+
+  .pairs .bar-row { margin-bottom: 5px; }
+  .pairs .bar-head { margin-bottom: 4px; }
+  .pairs .track { height: 9px; margin-bottom: 3px; }
+
+  .legend { display: flex; gap: 18px; font-size: 12px; color: var(--ink-soft); margin: -4px 0 12px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-size: 11px; letter-spacing: 0.7px; text-transform: uppercase; color: var(--ink-soft); font-weight: 600; padding: 0 12px 7px 0; border-bottom: 1px solid var(--hair); }
+  td { padding: 7px 12px 7px 0; border-bottom: 1px solid var(--hair); }
+  tr:last-child td { border-bottom: 0; }
+  td.num, th.num { text-align: right; padding-right: 0; font-variant-numeric: tabular-nums; }
+  td.mid, th.mid { text-align: right; padding-right: 26px; font-variant-numeric: tabular-nums; }
+  td.tag { color: var(--magenta-dark); font-weight: 600; white-space: nowrap; }
+  td.mono, th.mono { font-family: "SF Mono", Menlo, monospace; font-size: 12px; color: var(--ink-soft); }
+
+  table.dense td { padding-top: 4px; padding-bottom: 4px; font-size: 12.5px; }
+  table.dense th { padding-bottom: 6px; }
+
+  .strip { margin-top: 16px; padding-top: 13px; border-top: 2px solid var(--tint); }
+
+  .scopes { list-style: none; margin: 0; padding: 0; }
+  .scopes li {
+    display: grid;
+    grid-template-columns: 22px 1fr;
+    gap: 10px;
+    font-size: 13.5px;
+    line-height: 1.4;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--hair);
+  }
+  .scopes li:last-child { border-bottom: 0; }
+  .scopes li b { color: var(--magenta-dark); font-weight: 700; font-variant-numeric: tabular-nums; }
+
+  .scopes.across {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 28px;
+  }
+  .scopes.across li {
+    display: grid;
+    grid-template-columns: 22px 1fr;
+    border-bottom: 0;
+    padding: 0;
+    align-items: start;
+  }
+
+  .foot { position: absolute; left: 56px; right: 56px; bottom: 14px; font-size: 11px; color: #98A0B0; }
+
+  @media print {
+    body { background: #fff; padding: 0; gap: 0; }
+    .slide { page-break-after: always; }
+    @page { size: 1280px 720px; margin: 0; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============================ SLIDE 1 ============================ -->
+<section class="slide">
+  <div class="band">
+    <i class="band-cyan-l"></i>
+    <i class="band-blue-l"></i>
+    <i class="band-magenta"></i>
+    <i class="band-cyan-r"></i>
+    <i class="band-blue-r"></i>
+  </div>
+  <div class="title-plate"><h1>Deduplication</h1></div>
+
+  <div class="body">
+    <div class="kpis five">
+      <div class="kpi blu"><div class="v">111</div><div class="l">Rows in</div></div>
+      <div class="kpi blu"><div class="v">96</div><div class="l">Rows out</div></div>
+      <div class="kpi mag"><div class="v">15</div><div class="l">Rows removed &mdash; 13.5%</div></div>
+      <div class="kpi"><div class="v">3 &rarr; 0</div><div class="l">Emails used twice</div></div>
+      <div class="kpi"><div class="v">9 &rarr; 0</div><div class="l">Repeated person names</div></div>
+    </div>
+
+    <div class="cols">
+      <div>
+        <h2>Rows removed by reason</h2>
+
+        <div class="bar-row">
+          <div class="bar-head"><span>Same name + company</span><span>8</span></div>
+          <div class="track"><div class="fill mag" style="width:53.3%"></div></div>
+        </div>
+        <div class="bar-row">
+          <div class="bar-head"><span>Test / junk row dropped</span><span>4</span></div>
+          <div class="track"><div class="fill blu" style="width:26.7%"></div></div>
+        </div>
+        <div class="bar-row">
+          <div class="bar-head"><span>Exact same email</span><span>3</span></div>
+          <div class="track"><div class="fill cy" style="width:20%"></div></div>
+        </div>
+      </div>
+
+      <div>
+        <h2>Rows dropped as test data</h2>
+        <table class="dense">
+          <tr><th style="width:34%">Name</th><th>Email</th><th>Company</th></tr>
+          <tr><td>ABRP Pisal</td><td class="mono">abcdrf@test.com</td><td>Sailpoint</td></tr>
+          <tr><td>ABCDWED ERFT</td><td class="mono">abcdef@test.com</td><td>test ARP</td></tr>
+          <tr><td>ABCD DEF</td><td class="mono">abcd@test.com</td><td>TEST ARP</td></tr>
+          <tr><td>Test IDSEC</td><td class="mono">&mdash;</td><td>test</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="strip">
+      <h2>What it currently solves</h2>
+      <ol class="scopes across">
+        <li><b>1</b><span>Merges the same person on exact email, or on the same name + company</span></li>
+        <li><b>2</b><span>Drops test and junk rows (.test emails, placeholder names)</span></li>
+        <li><b>3</b><span>Keeps people who only share a company phone number as separate leads</span></li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="foot">lead_data_with_duplicates.csv (111 rows) &rarr; enriched.csv (96 rows) &middot; 16 columns unchanged</div>
+</section>
+
+<!-- ============================ SLIDE 2 ============================ -->
+<section class="slide">
+  <div class="band">
+    <i class="band-cyan-l"></i>
+    <i class="band-blue-l"></i>
+    <i class="band-magenta"></i>
+    <i class="band-cyan-r"></i>
+    <i class="band-blue-r"></i>
+  </div>
+  <div class="title-plate"><h1>Field Enrichment</h1></div>
+
+  <div class="body">
+    <div class="kpis three">
+      <div class="kpi mag"><div class="v">103</div><div class="l">Empty cells filled</div></div>
+      <div class="kpi blu"><div class="v">8.64 &rarr; 9.66</div><div class="l">Average filled fields per row, of 10</div></div>
+      <div class="kpi"><div class="v">54 &rarr; 77</div><div class="l">Rows with all 10 fields filled</div></div>
+    </div>
+
+    <div class="cols">
+      <div>
+        <h2>Share of rows with a value</h2>
+        <div class="legend">
+          <span><i style="background:#C3CBDC"></i>Before</span>
+          <span><i style="background:var(--magenta-dark)"></i>After</span>
+        </div>
+
+        <div class="pairs">
+          <div class="bar-row">
+            <div class="bar-head"><span>NumberOfEmployees</span><span>60% &rarr; 95%</span></div>
+            <div class="track"><div class="fill pale" style="width:60.4%"></div></div>
+            <div class="track"><div class="fill mag" style="width:94.8%"></div></div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-head"><span>Website</span><span>69% &rarr; 97%</span></div>
+            <div class="track"><div class="fill pale" style="width:68.8%"></div></div>
+            <div class="track"><div class="fill mag" style="width:96.9%"></div></div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-head"><span>AnnualRevenue</span><span>60% &rarr; 90%</span></div>
+            <div class="track"><div class="fill pale" style="width:60.4%"></div></div>
+            <div class="track"><div class="fill mag" style="width:89.6%"></div></div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-head"><span>Industry</span><span>91% &rarr; 98%</span></div>
+            <div class="track"><div class="fill pale" style="width:90.6%"></div></div>
+            <div class="track"><div class="fill mag" style="width:97.9%"></div></div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-head"><span>Phone</span><span>88% &rarr; 94%</span></div>
+            <div class="track"><div class="fill pale" style="width:87.5%"></div></div>
+            <div class="track"><div class="fill mag" style="width:93.8%"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h2>Empty cells filled</h2>
+        <table>
+          <tr><th style="width:62%">Field</th><th class="num">Cells</th></tr>
+          <tr><td>NumberOfEmployees</td><td class="num tag">33</td></tr>
+          <tr><td>Website</td><td class="num tag">29</td></tr>
+          <tr><td>AnnualRevenue</td><td class="num tag">28</td></tr>
+          <tr><td>Industry</td><td class="num tag">7</td></tr>
+          <tr><td>Phone</td><td class="num tag">6</td></tr>
+          <tr><td>Title, Email, Name, Company</td><td class="num mono">0</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="strip">
+      <div class="cols">
+        <div>
+          <h2>Existing values reformatted</h2>
+          <table class="dense">
+            <tr><th style="width:34%">Field</th><th style="width:14%" class="mid">Cells</th><th>Example</th></tr>
+            <tr><td>Phone</td><td class="mid">77</td><td class="mono">18132827000 &rarr; +18132827000</td></tr>
+            <tr><td>Website</td><td class="mid">64</td><td class="mono">amgen.com &rarr; https://amgen.com</td></tr>
+            <tr><td>Company</td><td class="mid">46</td><td class="mono">WALMART INC. &rarr; Walmart</td></tr>
+            <tr><td>Title</td><td class="mid">30</td><td class="mono">AE &rarr; Account Executive</td></tr>
+            <tr><td>Industry</td><td class="mid">29</td><td class="mono">Software &rarr; Technology</td></tr>
+          </table>
+        </div>
+        <div>
+          <h2>Future scopes</h2>
+          <ol class="scopes">
+            <li><b>1</b><span>Researching more about reference taxonomy and efficient normalization of values</span></li>
+            <li><b>2</b><span>Connecting this agent to Salesforce, so that whenever lead data is pushed the agent identifies and runs the pipeline</span></li>
+            <li><b>3</b><span>Filling LeadSource column with appropriate data (need to figure this out)</span></li>
+          </ol>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">96 rows scored on 10 fields: FirstName, LastName, Email, Company, Title, Phone, Industry, AnnualRevenue, Website, NumberOfEmployees</div>
+</section>
+
+</body>
+</html>

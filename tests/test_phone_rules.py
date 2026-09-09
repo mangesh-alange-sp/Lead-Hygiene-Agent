@@ -28,6 +28,7 @@ from pipeline.phone import (
     is_valid_nanp,
     normalize_phone,
     parse_phone,
+    split_phone_extension,
 )
 
 CALLING_CODES = sorted(set(REGION_CALLING.values()), key=len)
@@ -200,7 +201,35 @@ class ClassifyRules(unittest.TestCase):
         self.assertEqual(classify_phone("12"), "garbage")
         self.assertEqual(classify_phone("+44-7771-695-127"), "has_cc")
         self.assertEqual(classify_phone("98006498"), "missing_cc")
-        self.assertEqual(classify_phone("2065550100 ext. 12"), "noise")
+        self.assertEqual(classify_phone("2065550100 ext. 12"), "missing_cc")
+        self.assertEqual(classify_phone("+1 +44 2065550100"), "noise")
+
+
+class ExtensionRules(unittest.TestCase):
+    def test_split_common_pbx_suffixes(self):
+        cases = (
+            ("989.345.3660 Ext. 3151", "989.345.3660", "3151"),
+            ("(855) 595-3563 x454", "(855) 595-3563", "454"),
+            ("(732) 255-0400 ext. 2317", "(732) 255-0400", "2317"),
+            ("2065550100x12", "2065550100", "12"),
+            ("+1-206-555-0100", "+1-206-555-0100", ""),
+        )
+        for raw, expected_base, expected_ext in cases:
+            with self.subTest(raw=raw):
+                base, extension = split_phone_extension(raw)
+                self.assertEqual(base, expected_base)
+                self.assertEqual(extension, expected_ext)
+
+    def test_base_number_is_e164_and_extension_is_separate(self):
+        result = parse_phone("989.345.3660 Ext. 3151")
+        self.assertEqual(result["value"], "+19893453660")
+        self.assertEqual(result["status"], STATUS_VALID)
+        self.assertEqual(result["extension"], "3151")
+        self.assertEqual(result["raw"], "989.345.3660 Ext. 3151")
+
+    def test_slash_is_not_treated_as_an_extension_marker(self):
+        self.assertNotEqual(classify_phone("206-555-0100/12"), "noise")
+        self.assertEqual(split_phone_extension("206-555-0100/12")[1], "")
 
 
 class JunkRules(unittest.TestCase):

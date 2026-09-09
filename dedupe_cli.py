@@ -42,6 +42,10 @@ def main():
         dest.with_name(result["excel_file"]).write_text(
             result["excel_csv"], encoding="utf-8"
         )
+    if result.get("review_csv"):
+        dest.with_name(result["review_file"]).write_text(
+            result["review_csv"], encoding="utf-8"
+        )
     if dest.name != "deduped.csv":
         print(f"{dest} is ready.")
     print(format_run_summary(result["summary"]))

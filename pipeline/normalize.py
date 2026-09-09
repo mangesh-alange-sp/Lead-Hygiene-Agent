@@ -11,7 +11,7 @@ import re
 
 import pandas as pd
 
-from .casing import normalize_company_casing
+from .casing import normalize_company_casing, is_preserved_mixed_case
 from .config import REGION_TO_COUNTRY, TITLE_ACRONYMS
 from .phone import STATUS_NONE, infer_region, parse_phone
 from .taxonomy import TAXONOMY, resolve_company_alias
@@ -108,7 +108,7 @@ def normalize_company(company_raw: str) -> str:
 
 
 def normalize_title(title_raw: str) -> str:
-    """Applies title taxonomy or title cases job titles, keeping configured acronyms."""
+    """Applies title taxonomy or cases job titles, keeping acronyms and mixed case."""
     raw_clean = _cell(title_raw)
     if not raw_clean:
         return ""
@@ -119,24 +119,43 @@ def normalize_title(title_raw: str) -> str:
         return mapped
 
     title_tax = TAXONOMY.get("title", {})
-    words = []
-    for word in raw_clean.split():
-        key = _tax_key(word)
-        if key in title_tax:
-            words.append(title_tax[key])
-            continue
-        match = re.match(r"^([.,]*)([^.,]+)([.,]*)$", word)
-        if match:
-            core = match.group(2)
-            if core.upper() in TITLE_ACRONYMS:
-                words.append(f"{match.group(1)}{core.upper()}{match.group(3)}")
-                continue
-        words.append(word.capitalize())
-    rendered = " ".join(words)
+    words = [_case_title_word(word, title_tax) for word in raw_clean.split()]
+    rendered = " ".join(word for word in words if word)
     if is_low_quality_title(rendered):
         compact = re.sub(r"[.]", "", rendered)
         return compact.upper()
     return rendered
+
+
+def _case_title_piece(piece: str, title_tax: dict) -> str:
+    if not piece or piece in "-/":
+        return piece
+    match = re.match(r"^([.,]*)([^.,]+)([.,]*)$", piece)
+    prefix, core, suffix = match.groups() if match else ("", piece, "")
+    if core.isupper() and core.upper() in TITLE_ACRONYMS:
+        return f"{prefix}{core}{suffix}"
+    key = _tax_key(core)
+    if key in title_tax:
+        return f"{prefix}{title_tax[key]}{suffix}"
+    if core.upper() in TITLE_ACRONYMS:
+        return f"{prefix}{core.upper()}{suffix}"
+    if (
+        core.isalpha()
+        and 2 <= len(core) <= 5
+        and core.isupper()
+        and core.lower() not in {"of", "the", "and", "for", "to", "in", "at", "by"}
+    ):
+        return f"{prefix}{core}{suffix}"
+    if is_preserved_mixed_case(core):
+        return f"{prefix}{core}{suffix}"
+    return f"{prefix}{core.capitalize()}{suffix}"
+
+
+def _case_title_word(word: str, title_tax: dict) -> str:
+    parts = re.split(r"([-/])", word)
+    if len(parts) == 1:
+        return _case_title_piece(word, title_tax)
+    return "".join(_case_title_piece(part, title_tax) for part in parts)
 
 
 def _primary_title(value: str) -> str:
@@ -166,6 +185,31 @@ def _apply_map(section: str, value: str, title_case: bool = False) -> str:
     if mapped:
         return mapped
     return text.title() if title_case else text
+
+
+def _industry_map() -> dict:
+    mapping = dict(TAXONOMY.get("industry") or {})
+    for canonical in set(mapping.values()):
+        mapping.setdefault(_tax_key(canonical), canonical)
+    return mapping
+
+
+def normalize_industry(value) -> tuple:
+    """
+    Map to a closed picklist value.
+
+    Lookup uses the alias table, then alias_key of each canonical name so
+    'Transportation And Logistics' and 'Transportation & Logistics' unify.
+    Unknown values are preserved as submitted (never title-cased) and the
+    second item is True so the caller can flag HITL.
+    """
+    text = _cell(value)
+    if not text:
+        return "", False
+    mapped = _industry_map().get(_tax_key(text))
+    if mapped:
+        return mapped, False
+    return text, True
 
 
 def normalize_street(value: str) -> str:
@@ -242,7 +286,8 @@ def normalize_dataframe(df: pd.DataFrame) -> tuple:
     df = df.copy()
     for col in (
         "data_quality_flags", "hitl_review", "phone_status", "phone_reason",
-        "Phone_raw", "change_reasons", "completeness_flag", "email_status",
+        "Phone_raw", "PhoneExtension", "change_reasons", "completeness_flag",
+        "email_status", "Email_raw",
     ):
         if col not in df.columns:
             df[col] = ""
@@ -274,6 +319,7 @@ def normalize_dataframe(df: pd.DataFrame) -> tuple:
 
         phone = parsed["value"] or ""
         df.at[idx, "Phone_raw"] = parsed["raw"] or stashed
+        df.at[idx, "PhoneExtension"] = parsed.get("extension") or ""
         df.at[idx, "phone_status"] = parsed["status"] or ""
         df.at[idx, "phone_reason"] = parsed.get("reason") or ""
         # Reasons recorded upstream (email validation) must survive.
@@ -309,9 +355,10 @@ def normalize_dataframe(df: pd.DataFrame) -> tuple:
             reasons.append(web_reason)
         norm_count += _set_if_changed(df, idx, "Website", website, existing_web)
         df.at[idx, "change_reasons"] = " | ".join(part for part in reasons if part)
-        norm_count += _set_if_changed(
-            df, idx, "Industry", _apply_map("industry", row.get("Industry"), True), row.get("Industry")
-        )
+        industry, unknown_industry = normalize_industry(row.get("Industry"))
+        norm_count += _set_if_changed(df, idx, "Industry", industry, row.get("Industry"))
+        if unknown_industry:
+            _flag_row(df, idx, "unknown_industry", hitl=True)
         norm_count += _set_if_changed(df, idx, "Country", country, row.get("Country"))
         norm_count += _set_if_changed(
             df, idx, "State", _apply_map("state", row.get("State"), True), row.get("State")

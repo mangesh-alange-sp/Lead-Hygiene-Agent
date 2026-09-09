@@ -15,6 +15,11 @@ Every record lands in exactly one of three states (see PHONE_STATUSES):
   unparseable   -> no usable digits at all (dummy/garbage), value cleared
   "" (no state) -> the field was blank on arrival; there is nothing to review
 
+A PBX suffix (`ext. 12`, `x454`) is split off first. The base number follows
+the same resolution order; the extension is stored beside the row, never on
+Phone. Two `+` signs in the base still mean noise. A slash is not treated as
+noise on its own.
+
 Resolution order, each step gated by `is_valid_number()`:
 
   1. parse(raw, None)                  - raw already carries a country code
@@ -75,6 +80,11 @@ NO_EVIDENCE_REASON = (
 )
 
 E164_RE = re.compile(r"^\+\d{6,15}$")
+# PBX suffixes like "ext. 3151", "x454". Captured separately so the base
+# number can still validate; the extension never belongs on Salesforce Phone.
+_EXTENSION_RE = re.compile(
+    r"(?i)(?:ext(?:ension)?\.?|(?<![a-z])x)\s*[.:]?\s*(\d{1,8})\s*$"
+)
 
 
 def region_from_email(email) -> str:
@@ -187,6 +197,36 @@ def is_international_format(value) -> bool:
     return bool(re.match(r"^\+\d", cell(value)))
 
 
+# The one +CC shape a spreadsheet cannot mistake for a formula, and the
+# characters that start a formula. Both mirror
+# invariants.phone_looks_like_excel_formula, which gates the write-back.
+_EXCEL_SAFE_PLUS_RE = re.compile(r"^\+\d[\d-]*$")
+_FORMULA_LEAD_RE = re.compile(r"^[=@+-]")
+
+
+def excel_safe_international(value) -> str:
+    """
+    Regroup an unvalidated number so a spreadsheet cannot evaluate it.
+
+    '+971 4 123 4567' becomes '+971-4-123-4567': every digit and the country
+    code survive and the grouping is still visible, but the value no longer
+    reads as a formula. Dashes are kept rather than collapsing to bare E.164
+    so the number does not pose as validated.
+
+    A leading '+' is a real country-code marker and is kept. A leading '=',
+    '@' or '-' is a spreadsheet artifact carrying no dialling meaning, so it
+    is dropped. The as-submitted string stays in Phone_raw either way, so
+    nothing is lost for review.
+    """
+    text = cell(value)
+    if not text or not _FORMULA_LEAD_RE.match(text) or _EXCEL_SAFE_PLUS_RE.match(text):
+        return text
+    groups = [group for group in re.split(r"\D+", text) if group]
+    if not groups:
+        return ""
+    return ("+" if text.startswith("+") else "") + "-".join(groups)
+
+
 def input_has_calling_code(raw_phone) -> bool:
     """True for explicit +CC / 00CC. Dummy zeros like 000-000-000 are not a CC."""
     text = _unwrap_bracketed_cc(strip_excel_artifacts(raw_phone))
@@ -226,13 +266,30 @@ def format_for_region(raw_phone, region: str) -> str:
     return format_e164(parsed) if parsed else ""
 
 
+def split_phone_extension(raw_phone) -> tuple:
+    """
+    Split a PBX extension off the dialable number.
+
+    Returns (base, extension). `base` is the original string with the suffix
+    removed; `extension` is digits only, or '' when none was present.
+    """
+    raw = collapse_whitespace(strip_excel_artifacts(raw_phone))
+    if not raw:
+        return "", ""
+    match = _EXTENSION_RE.search(raw)
+    if not match:
+        return raw, ""
+    return raw[: match.start()].rstrip(" ,;/-"), match.group(1)
+
+
 def classify_phone(raw_phone) -> str:
     """Classify the input before touching it: empty, garbage, noise, has_cc, missing_cc."""
-    raw = _unwrap_bracketed_cc(collapse_whitespace(strip_excel_artifacts(raw_phone)))
+    base, _extension = split_phone_extension(raw_phone)
+    raw = _unwrap_bracketed_cc(base)
     if not raw:
         return "empty"
     digits = digits_only(raw)
-    if re.search(r"\bext\.?\b|\bx\d+|/", raw, re.I) or raw.count("+") > 1:
+    if raw.count("+") > 1:
         return "noise"
     if not digits or is_junk_phone(raw):
         return "garbage"
@@ -245,13 +302,16 @@ def parse_phone(raw_phone, email="", company="", country=""):
     """
     Resolve one phone value.
 
-    Returns {value, status, reason, raw, class_} where status is one of
-    PHONE_STATUSES and `raw` is always the as-submitted value.
+    Returns {value, status, reason, raw, class_, extension} where status is
+    one of PHONE_STATUSES and `raw` is always the as-submitted value.
+    `extension` is the PBX suffix when present; it is never written onto
+    `value`.
     """
     submitted = cell(raw_phone)
-    cleaned = _unwrap_bracketed_cc(collapse_whitespace(strip_excel_artifacts(raw_phone)))
+    base_text, extension = split_phone_extension(raw_phone)
+    cleaned = _unwrap_bracketed_cc(base_text)
     kind = classify_phone(raw_phone)
-    base = {"raw": submitted, "class_": kind}
+    base = {"raw": submitted, "class_": kind, "extension": extension}
 
     if kind == "empty":
         # No phone was submitted, so there is no phone to have a state. Calling
@@ -313,9 +373,10 @@ def parse_phone(raw_phone, email="", company="", country=""):
                 ),
             }
 
-    # Nothing validated. Keep the submitted value exactly as it came in.
+    # Nothing validated. Keep the submitted digits, regrouped only as far as
+    # the Excel-formula gate requires so the batch is not blocked outright.
     return {
-        **base, "value": cleaned, "status": STATUS_NEEDS_REVIEW,
+        **base, "value": excel_safe_international(cleaned), "status": STATUS_NEEDS_REVIEW,
         "reason": NO_EVIDENCE_REASON if not had_evidence else (
             "phone: region evidence found but libphonenumber rejected the "
             "number; original kept unchanged for review"

@@ -55,13 +55,31 @@ Rules currently pinned:
 ## 3. Batch invariants (production gate)
 
 `pipeline/invariants.py` runs on every batch in `process_csv` before the CSV is
-serialized. On violation the run returns `status: "error"` with
-`invariant_violations` and writes nothing.
+serialized. Nothing that fails a check is ever written back, but how the run
+reports it depends on whether the fault belongs to one row or to the batch.
 
 Checks: no Excel text marker or formula prefix (`+` `=` `-` `@`) on
 `Phone`/`MobilePhone`; no lowercase letter after
 a dot in `Company` outside the domain/whitelist forms; no `Website` on a
-free-provider domain; no duplicate normalized emails; row count never grows.
+free-provider domain; no duplicate normalized emails; row count never grows;
+every input Id is accounted for in the write-back, a merge, a test-data drop,
+or a review hold.
+
+**Row-level faults are quarantined, not fatal.** `row_level_violations` covers
+the faults that belong to a single lead: the phone and `Company` casing checks
+and the free-provider `Website` check. Those rows are dropped from the
+write-back and written to `needs_review.csv` with a `needs_review_reason`
+column and the original `Phone_raw`; every other row is delivered normally.
+The run stays `status: "ok"` and reports the count in
+`totals.rows_held_for_review`. This matters because the agent batches large
+files: one dirty lead used to block every row it happened to ship with.
+
+**Batch-shaped faults still write nothing.** A vanished lead, a grown row
+count, or a surviving duplicate email is a relationship between rows, so no
+single row can be blamed and quarantining one would hide the bug. These return
+`status: "error"` with `invariant_violations`. The same applies when *every*
+row fails a row-level check, which points at a broken transformation rather
+than dirty data, and must not be reported as a successful empty run.
 
 ## 4. Shadow diff before shipping a change
 

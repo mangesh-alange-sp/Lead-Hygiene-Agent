@@ -31,7 +31,7 @@ IDENTITY_SIGNALS = frozenset({"exact_email", "name+company", "name+phone"})
 # Written by validate/dedupe for internal routing; never part of the output CSV.
 INTERNAL_FIELDS = (
     "data_quality_flags", "hitl_review", "phone_status", "phone_reason",
-    "Phone_raw", "completeness_flag", "email_status",
+    "Phone_raw", "PhoneExtension", "Email_raw", "completeness_flag", "email_status",
 )
 
 

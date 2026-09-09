@@ -6,10 +6,13 @@ from pipeline.invariants import (
     InvariantViolation,
     assert_records,
     check_drop_provenance,
+    check_enrich_preservation,
+    check_hygiene_preservation,
     check_records,
     company_has_bad_dotted_case,
     phone_has_text_marker,
     phone_looks_like_excel_formula,
+    snapshot_email_phone,
 )
 
 
@@ -172,6 +175,67 @@ class DropProvenanceTests(unittest.TestCase):
             dropped_test_ids=[],
         )
         self.assertTrue(any("no paper trail" in v for v in violations))
+
+
+class ContactPreservationTests(unittest.TestCase):
+    def test_snapshot_captures_email_and_phone_by_id(self):
+        snaps = snapshot_email_phone([
+            _row(Id="00Q001", Email="pat@acme.com", Phone="+12065550100"),
+            _row(Id="00Q002", Email="", Phone="989.345.3660 Ext. 3151"),
+        ])
+        self.assertEqual(snaps["00Q001"]["Email"], "pat@acme.com")
+        self.assertEqual(snaps["00Q002"]["Phone"], "989.345.3660 Ext. 3151")
+
+    def test_hygiene_may_not_blank_a_keepable_email(self):
+        records = [_row(
+            Email="", Email_raw="ddunn@trover.org",
+            email_status="undeliverable",
+        )]
+        source = {"00Q001": {"Email": "ddunn@trover.org", "Phone": "+12065550100"}}
+        violations = check_hygiene_preservation(records, source_contacts=source)
+        self.assertTrue(any("Email was blanked" in v for v in violations))
+        self.assertTrue(any("Email was blanked" in v for v in check_records(records, source_contacts=source)))
+
+    def test_hygiene_may_clear_invalid_syntax_and_placeholders(self):
+        records = [
+            _row(Id="00Q001", Email="", Email_raw="not-an-email",
+                 email_status="invalid_syntax", Phone="+12065550100"),
+            _row(Id="00Q002", Email="", Email_raw="willy@wonka.com",
+                 email_status="undeliverable", Phone="+12065550101"),
+        ]
+        source = {
+            "00Q001": {"Email": "not-an-email", "Phone": "+12065550100"},
+            "00Q002": {"Email": "willy@wonka.com", "Phone": "+12065550101"},
+        }
+        self.assertEqual(check_hygiene_preservation(records, source_contacts=source), [])
+
+    def test_hygiene_may_not_blank_a_phone_that_only_had_an_extension(self):
+        records = [_row(Phone="", Phone_raw="989.345.3660 Ext. 3151")]
+        source = {"00Q001": {"Email": "pat@acme.com", "Phone": "989.345.3660 Ext. 3151"}}
+        violations = check_hygiene_preservation(records, source_contacts=source)
+        self.assertTrue(any("Phone was blanked" in v for v in violations))
+
+    def test_hygiene_may_clear_a_junk_phone(self):
+        records = [_row(Phone="", Phone_raw="000-000-000", phone_status="unparseable")]
+        source = {"00Q001": {"Email": "pat@acme.com", "Phone": "000-000-000"}}
+        self.assertEqual(check_hygiene_preservation(records, source_contacts=source), [])
+
+    def test_enrich_may_not_blank_filled_email_or_phone(self):
+        before = {"00Q001": {"Email": "pat@acme.com", "Phone": "+12065550100"}}
+        after = [_row(Email="", Phone="")]
+        violations = check_enrich_preservation(before, after)
+        self.assertTrue(any("blanked Email" in v for v in violations))
+        self.assertTrue(any("blanked a Phone" in v for v in violations))
+
+    def test_enrich_may_blank_email_on_the_explicit_no_replacement_path(self):
+        before = {"00Q001": {"Email": "pat@acme.com", "Phone": "+12065550100"}}
+        after = [_row(Email="", Phone="+12065550100")]
+        self.assertEqual(
+            check_enrich_preservation(
+                before, after, allowed_email_blank_ids=["00Q001"],
+            ),
+            [],
+        )
 
 
 if __name__ == "__main__":

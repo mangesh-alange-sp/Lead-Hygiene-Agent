@@ -71,6 +71,7 @@ PLACEHOLDER_CONTACT = frozenset({"test", "n/a", "na", "none", "null", "unknown",
 COMPLETENESS_FIELDS = ("Title", "Industry", "AnnualRevenue")
 AUDIT_EXTRA_COLS = (
     "completeness_flag", "email_status", "change_reasons", "Phone_raw",
+    "PhoneExtension", "Email_raw",
 )
 
 
@@ -207,12 +208,14 @@ def validate_dataframe(df: pd.DataFrame) -> tuple:
             flags = _add_flag(flags, "missing_last_name")
             issue_count += 1
 
-        # Library-backed syntax + real MX deliverability. An undeliverable
-        # address nulls the field but never drops the lead.
+        # Syntax-valid addresses stay on the row even when MX says the domain
+        # does not accept mail. Enrichment may later replace those. Only
+        # malformed and placeholder/reserved addresses are cleared here.
         email_ok = False
         if email:
             checked = validate_lead_email(email)
             df.at[idx, "email_status"] = checked["status"]
+            df.at[idx, "Email_raw"] = checked.get("raw") or email
             if checked["reason"]:
                 reasons.append(checked["reason"])
             df.at[idx, "Email"] = checked["value"]

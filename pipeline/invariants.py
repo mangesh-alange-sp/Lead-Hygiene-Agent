@@ -5,6 +5,12 @@ and hard-fail the run, so a bad transformation cannot reach Salesforce.
 
 They are data-shape rules, not fixture comparisons, so they hold for any real
 Salesforce export.
+
+Email and Phone preservation: a keepable source Email may not be blanked at
+hygiene (only invalid syntax and placeholder/reserved domains may clear). A
+source Phone may not be blanked unless the base number is junk. Enrichment
+must not blank a filled Email or Phone except Email Ids on the explicit
+unvalidated-no-replacement list.
 """
 
 import re
@@ -78,6 +84,134 @@ def phone_lost_country_code(raw, cleaned) -> bool:
     return digits_only(out) != digits_only(raw)
 
 
+def snapshot_email_phone(records) -> dict:
+    """Id -> original Email/Phone. Used to prove hygiene or enrich did not wipe them."""
+    snaps = {}
+    for record in records:
+        lead_id = cell(record.get("Id", ""))
+        if not lead_id:
+            continue
+        snaps[lead_id] = {
+            "Email": cell(record.get("Email", "")),
+            "Phone": cell(record.get("Phone", "")),
+        }
+    return snaps
+
+
+def _source_email(record, prior) -> str:
+    if prior and "Email" in prior:
+        return cell(prior.get("Email", ""))
+    return cell(record.get("Email_raw", ""))
+
+
+def _source_phone(record, prior) -> str:
+    if prior and "Phone" in prior:
+        return cell(prior.get("Phone", ""))
+    return cell(record.get("Phone_raw", ""))
+
+
+def hygiene_email_blank_allowed(source_email, record) -> bool:
+    """
+    A submitted email may be cleared only for invalid syntax or a
+    placeholder/RFC-reserved domain. MX misses must stay on the row.
+    """
+    from .domains import is_placeholder_domain
+    from .emailcheck import INVALID_SYNTAX, is_reserved_domain
+    from .textnorm import email_domain
+
+    if not cell(source_email):
+        return True
+    if cell(record.get("Email", "")):
+        return True
+    status = cell(record.get("email_status", ""))
+    if status == INVALID_SYNTAX:
+        return True
+    raw = cell(record.get("Email_raw", "")) or cell(source_email)
+    domain = email_domain(raw)
+    return is_reserved_domain(domain) or is_placeholder_domain(domain)
+
+
+def hygiene_phone_blank_allowed(source_phone, record) -> bool:
+    """
+    A submitted phone may be cleared only when the base number is junk.
+    An extension suffix is not junk: classify runs after the suffix is split.
+    """
+    from .phone import classify_phone
+
+    if not cell(source_phone):
+        return True
+    if cell(record.get("Phone", "")):
+        return True
+    raw = cell(record.get("Phone_raw", "")) or cell(source_phone)
+    return classify_phone(raw) in {"empty", "garbage", "noise"}
+
+
+def check_hygiene_preservation(records, source_contacts=None) -> list:
+    """Hard-fail when hygiene blanked a keepable Email or Phone."""
+    source_contacts = source_contacts or {}
+    lost_email, lost_phone = [], []
+    for record in records:
+        lead_id = cell(record.get("Id", ""))
+        prior = source_contacts.get(lead_id) or {}
+        if not hygiene_email_blank_allowed(_source_email(record, prior), record):
+            lost_email.append(lead_id or "(missing Id)")
+        if not hygiene_phone_blank_allowed(_source_phone(record, prior), record):
+            lost_phone.append(lead_id or "(missing Id)")
+    violations = []
+    if lost_email:
+        violations.append(
+            "Email was blanked though the source address was keepable: "
+            f"{_sample(lost_email)}"
+        )
+    if lost_phone:
+        violations.append(
+            "Phone was blanked though the source number had a recoverable base: "
+            f"{_sample(lost_phone)}"
+        )
+    return violations
+
+
+def check_enrich_preservation(
+    before,
+    after_records,
+    allowed_email_blank_ids=None,
+) -> list:
+    """
+    Enrichment must not wipe a cell that arrived filled from deduped.csv.
+
+    Email may go blank only for Ids on the explicit unvalidated-no-replacement
+    list (filled by the later trust-gate step). Phone must never go blank here.
+    """
+    allowed = {cell(value) for value in (allowed_email_blank_ids or [])}
+    after_by_id = {}
+    for record in after_records:
+        lead_id = cell(record.get("Id", ""))
+        if lead_id:
+            after_by_id[lead_id] = record
+    lost_email, lost_phone = [], []
+    for lead_id, prior in (before or {}).items():
+        now = after_by_id.get(lead_id)
+        if now is None:
+            continue
+        if cell(prior.get("Email", "")) and not cell(now.get("Email", "")):
+            if lead_id not in allowed:
+                lost_email.append(lead_id)
+        if cell(prior.get("Phone", "")) and not cell(now.get("Phone", "")):
+            lost_phone.append(lead_id)
+    violations = []
+    if lost_email:
+        violations.append(
+            "Enrichment blanked Email without the unvalidated-no-replacement path: "
+            f"{_sample(lost_email)}"
+        )
+    if lost_phone:
+        violations.append(
+            "Enrichment blanked a Phone that was present on deduped.csv: "
+            f"{_sample(lost_phone)}"
+        )
+    return violations
+
+
 def company_has_bad_dotted_case(value) -> bool:
     """
     Flags 'Amazon.com'-style lowercase-after-dot only when the token is neither a
@@ -96,6 +230,36 @@ def company_has_bad_dotted_case(value) -> bool:
             continue
         return True
     return False
+
+
+def row_level_violations(record) -> list:
+    """
+    Reasons this one row must not be written back. Empty means the row is clean.
+
+    Only faults that belong to a single record appear here, so a caller can
+    quarantine the row and keep the rest of the batch. Batch-shaped faults
+    (row count grew, a lead vanished, duplicate emails survived) are excluded
+    on purpose: those mean the pipeline misbehaved, not that one lead is
+    dirty, and they must keep failing the run.
+    """
+    reasons = []
+    for column in ("Phone", "MobilePhone"):
+        value = record.get(column)
+        if phone_has_text_marker(value):
+            reasons.append(f"{column} carries an Excel text marker")
+        if phone_looks_like_excel_formula(value):
+            reasons.append(f"{column} would be evaluated as an Excel formula")
+    if phone_lost_country_code(record.get("Phone_raw", record.get("Phone")), record.get("Phone")):
+        reasons.append("Phone lost a country code that was present on input")
+    if phone_lost_country_code(record.get("MobilePhone_raw", ""), record.get("MobilePhone")):
+        reasons.append("MobilePhone lost a country code that was present on input")
+    if company_has_bad_dotted_case(record.get("Company")):
+        reasons.append("Company has lowercase after a dot outside the allowlist")
+    if is_free_provider_website(record.get("Website")):
+        reasons.append(
+            f"Website points at a free mail provider ({cell(record.get('Website'))})"
+        )
+    return reasons
 
 
 def _ids(values) -> list:
@@ -122,15 +286,22 @@ def _parse_absorbed_signals(entry: dict) -> dict:
     return parsed
 
 
-def check_drop_provenance(input_ids, output_ids, merge_log=None, dropped_test_ids=None) -> list:
+def check_drop_provenance(
+    input_ids,
+    output_ids,
+    merge_log=None,
+    dropped_test_ids=None,
+    quarantined_ids=None,
+) -> list:
     """
     Every input Id missing from write-back must be either an explicit test-data
-    drop or absorbed into a survivor via email, phone, or name+company.
+    drop, a row held back for review, or absorbed into a survivor via email,
+    phone, or name+company.
     """
     violations = []
     inputs = set(_ids(input_ids))
     outputs = set(_ids(output_ids))
-    dropped_test = set(_ids(dropped_test_ids))
+    dropped_test = set(_ids(dropped_test_ids)) | set(_ids(quarantined_ids))
     absorbed = {}
     for entry in merge_log or []:
         survivor = cell(entry.get("surviving_lead_id", ""))
@@ -176,10 +347,20 @@ def check_drop_provenance(input_ids, output_ids, merge_log=None, dropped_test_id
     return violations
 
 
-def check_records(records, rows_in=None, input_ids=None, merge_log=None, dropped_test_ids=None) -> list:
+def check_records(
+    records,
+    rows_in=None,
+    input_ids=None,
+    merge_log=None,
+    dropped_test_ids=None,
+    quarantined_ids=None,
+    source_contacts=None,
+) -> list:
     """Return a list of human-readable invariant violations (empty means clean)."""
     violations = []
     records = list(records)
+
+    violations.extend(check_hygiene_preservation(records, source_contacts=source_contacts))
 
     marked = [cell(r.get("Id", "")) for r in records if phone_has_text_marker(r.get("Phone"))]
     marked += [cell(r.get("Id", "")) for r in records if phone_has_text_marker(r.get("MobilePhone"))]
@@ -242,6 +423,7 @@ def check_records(records, rows_in=None, input_ids=None, merge_log=None, dropped
                 output_ids,
                 merge_log=merge_log,
                 dropped_test_ids=dropped_test_ids,
+                quarantined_ids=quarantined_ids,
             )
         )
 
