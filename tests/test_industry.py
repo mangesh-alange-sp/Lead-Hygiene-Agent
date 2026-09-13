@@ -21,8 +21,9 @@ class NormalizeIndustryTests(unittest.TestCase):
                 self.assertFalse(unknown)
 
     def test_expanded_aliases_map(self):
-        self.assertEqual(normalize_industry("software and technology")[0], "Technology")
-        self.assertEqual(normalize_industry("healthcare and medical")[0], "Healthcare")
+        self.assertEqual(normalize_industry("saas")[0], "Technology")
+        self.assertEqual(normalize_industry("software and technology")[0], "Software and Technology")
+        self.assertEqual(normalize_industry("healthcare and medical")[0], "Healthcare and Medical")
 
     def test_unknown_value_is_preserved_not_title_cased(self):
         value, unknown = normalize_industry("widgets")
@@ -37,7 +38,7 @@ class NormalizeIndustryTests(unittest.TestCase):
         })
         out, _ = normalize_dataframe(df)
         self.assertEqual(out.at[0, "Industry"], "widgets")
-        self.assertIn("unknown_industry", str(out.at[0, "data_quality_flags"]))
+        self.assertIn("unmapped_industry", str(out.at[0, "data_quality_flags"]))
         self.assertEqual(out.at[0, "hitl_review"], "Yes")
 
 

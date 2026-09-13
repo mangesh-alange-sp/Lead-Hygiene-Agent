@@ -14,6 +14,7 @@ import pandas as pd
 from .casing import normalize_company_casing, is_preserved_mixed_case
 from .config import REGION_TO_COUNTRY, TITLE_ACRONYMS
 from .phone import STATUS_NONE, infer_region, parse_phone
+from .picklists import resolve_picklist
 from .taxonomy import TAXONOMY, resolve_company_alias
 from .textnorm import alias_key, cell as _cell
 from .website import resolve_website_with_reason
@@ -29,7 +30,8 @@ def _lookup(section: str, value: str):
 
 def infer_phone_region(email: str = "", country: str = "", phone: str = "") -> str:
     """Kept for callers that only need the region signal."""
-    mapped = _lookup("country", country) or _cell(country)
+    resolved = resolve_picklist("Country", country)
+    mapped = resolved["value"] if resolved["matched"] else _cell(country)
     return infer_region(email=email, country=mapped, phone=phone)
 
 
@@ -187,29 +189,10 @@ def _apply_map(section: str, value: str, title_case: bool = False) -> str:
     return text.title() if title_case else text
 
 
-def _industry_map() -> dict:
-    mapping = dict(TAXONOMY.get("industry") or {})
-    for canonical in set(mapping.values()):
-        mapping.setdefault(_tax_key(canonical), canonical)
-    return mapping
-
-
 def normalize_industry(value) -> tuple:
-    """
-    Map to a closed picklist value.
-
-    Lookup uses the alias table, then alias_key of each canonical name so
-    'Transportation And Logistics' and 'Transportation & Logistics' unify.
-    Unknown values are preserved as submitted (never title-cased) and the
-    second item is True so the caller can flag HITL.
-    """
-    text = _cell(value)
-    if not text:
-        return "", False
-    mapped = _industry_map().get(_tax_key(text))
-    if mapped:
-        return mapped, False
-    return text, True
+    """Map to a Salesforce Industry picklist value. Unknowns are preserved."""
+    result = resolve_picklist("Industry", value)
+    return result["value"], not result["matched"]
 
 
 def normalize_street(value: str) -> str:
@@ -300,14 +283,19 @@ def normalize_dataframe(df: pd.DataFrame) -> tuple:
 
         email = _cell(row.get("Email", "")).lower()
         norm_count += _set_if_changed(df, idx, "Email", email, row.get("Email"))
-        country = _apply_map("country", row.get("Country"), True)
+        country_result = resolve_picklist("Country", row.get("Country"))
+        country = country_result["value"]
         company = normalize_company(row.get("Company"))
 
         parsed = parse_phone(row.get("Phone"), email=email, company=company, country=country)
         if not country:
             region = infer_region(email=email, country="", phone=row.get("Phone", ""))
             if region:
-                country = REGION_TO_COUNTRY.get(region, "")
+                inferred = REGION_TO_COUNTRY.get(region, "")
+                inferred_result = resolve_picklist("Country", inferred)
+                country = inferred_result["value"] if inferred_result["matched"] else inferred
+                if inferred_result["matched"]:
+                    country_result = inferred_result
                 parsed = parse_phone(row.get("Phone"), email=email, company=company, country=country)
         # Validation may have already cleared a junk phone and stashed the
         # submitted value. Re-read it so the discard stays visible as a state
@@ -358,17 +346,26 @@ def normalize_dataframe(df: pd.DataFrame) -> tuple:
         industry, unknown_industry = normalize_industry(row.get("Industry"))
         norm_count += _set_if_changed(df, idx, "Industry", industry, row.get("Industry"))
         if unknown_industry:
-            _flag_row(df, idx, "unknown_industry", hitl=True)
+            _flag_row(df, idx, "unmapped_industry", hitl=True)
+        if country_result["flag"] and row.get("Country"):
+            _flag_row(df, idx, country_result["flag"], hitl=True)
         norm_count += _set_if_changed(df, idx, "Country", country, row.get("Country"))
+        state_result = resolve_picklist("State", row.get("State"), country=country)
+        norm_count += _set_if_changed(df, idx, "State", state_result["value"], row.get("State"))
+        if state_result["flag"]:
+            _flag_row(df, idx, state_result["flag"], hitl=True)
+        source_result = resolve_picklist("LeadSource", row.get("LeadSource"))
         norm_count += _set_if_changed(
-            df, idx, "State", _apply_map("state", row.get("State"), True), row.get("State")
+            df, idx, "LeadSource", source_result["value"], row.get("LeadSource")
         )
+        if source_result["flag"]:
+            _flag_row(df, idx, source_result["flag"], hitl=True)
+        status_result = resolve_picklist("Status", row.get("Status"))
         norm_count += _set_if_changed(
-            df, idx, "LeadSource", _apply_map("lead source", row.get("LeadSource")), row.get("LeadSource")
+            df, idx, "Status", status_result["value"], row.get("Status")
         )
-        norm_count += _set_if_changed(
-            df, idx, "Status", _apply_map("status", row.get("Status")), row.get("Status")
-        )
+        if status_result["flag"]:
+            _flag_row(df, idx, status_result["flag"], hitl=True)
         norm_count += _set_if_changed(
             df, idx, "Street", normalize_street(row.get("Street")), row.get("Street")
         )

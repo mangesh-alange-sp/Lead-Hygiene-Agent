@@ -107,6 +107,8 @@ Alias tables only. `pipeline/taxonomy.py` reads each `##` section as `{alias: ca
 
 ## Industry
 
+Nicknames only. Official Salesforce labels are matched from `data/salesforce_picklists.json`.
+
 | Alias | Canonical |
 |---|---|
 | software | Technology |
@@ -114,77 +116,55 @@ Alias tables only. `pipeline/taxonomy.py` reads each `##` section as `{alias: ca
 | tech | Technology |
 | saas | Technology |
 | it | Technology |
-| technology | Technology |
+| software and technology | Technology |
 | business services | Professional Services |
 | consulting | Professional Services |
 | advisory | Professional Services |
-| professional services | Professional Services |
 | finance | Financial Services |
 | banking | Financial Services |
 | fintech | Financial Services |
-| financial services | Financial Services |
-| hospitality | Hospitality & Travel |
-| travel | Hospitality & Travel |
-| hotels | Hospitality & Travel |
-| tourism | Hospitality & Travel |
+| travel | Hospitality |
+| hotels | Hospitality |
+| tourism | Hospitality |
 | real estate & leasing | Real Estate & Construction |
-| construction | Real Estate & Construction |
 | real estate | Real Estate & Construction |
 | property | Real Estate & Construction |
-| utilities | Energy & Utilities |
-| energy | Energy & Utilities |
 | oil and gas | Energy & Utilities |
 | power | Energy & Utilities |
 | energy utilities & waste | Energy & Utilities |
 | primary/secondary education | Education |
-| education | Education |
 | edu | Education |
 | university | Education |
 | higher education | Education |
 | consumer goods | Retail |
-| retail | Retail |
 | ecommerce | Retail |
 | e-commerce | Retail |
 | electrical/electronic manufacturing | Manufacturing |
 | packaging and containers | Manufacturing |
-| manufacturing | Manufacturing |
 | industrial | Manufacturing |
 | production | Manufacturing |
 | automotive | Manufacturing |
 | auto | Manufacturing |
-| healthcare | Healthcare |
 | medical | Healthcare |
 | pharma | Healthcare |
 | life sciences | Healthcare |
-| government | Government |
+| healthcare and medical | Healthcare |
 | govt | Government |
 | public sector | Government |
 | federal | Government |
 | telecom | Telecommunications |
-| telecommunications | Telecommunications |
-| communications | Telecommunications |
-| insurance | Insurance |
 | aerospace | Aerospace & Defense |
 | defense | Aerospace & Defense |
 | aerospace and defense | Aerospace & Defense |
-| transportation | Transportation & Logistics |
 | logistics | Transportation & Logistics |
 | supply chain | Transportation & Logistics |
-| transportation and logistics | Transportation & Logistics |
-| software and technology | Technology |
-| healthcare and medical | Healthcare |
-| legal | Legal |
 | law firm | Legal |
 | law | Legal |
 | nonprofit | Non-Profit |
-| non-profit | Non-Profit |
 | ngo | Non-Profit |
 | food | Food & Beverage |
-| food and beverage | Food & Beverage |
 | f&b | Food & Beverage |
 | fmcg | Food & Beverage |
-| media | Media & Entertainment |
-| entertainment | Media & Entertainment |
 | publishing | Media & Entertainment |
 
 ## Country
@@ -202,7 +182,6 @@ Alias tables only. `pipeline/taxonomy.py` reads each `##` section as `{alias: ca
 | in | India |
 | bharat | India |
 | ca | Canada |
-| canada | Canada |
 | au | Australia |
 | aus | Australia |
 | de | Germany |
@@ -217,27 +196,22 @@ Alias tables only. `pipeline/taxonomy.py` reads each `##` section as `{alias: ca
 
 ## State
 
+Abbreviations only. Full names match the Salesforce state list. `ca` becomes California only when Country is United States.
+
 | Alias | Canonical |
 |---|---|
 | tx | Texas |
 | tex | Texas |
-| texas | Texas |
 | ca | California |
 | calif | California |
-| california | California |
 | ny | New York |
 | n.y. | New York |
-| new york | New York |
 | wa | Washington |
 | wash | Washington |
-| washington | Washington |
 | ma | Massachusetts |
 | mass | Massachusetts |
-| massachusetts | Massachusetts |
 | on | Ontario |
-| ontario | Ontario |
 | bc | British Columbia |
-| british columbia | British Columbia |
 
 ## Street
 
@@ -270,46 +244,20 @@ Alias tables only. `pipeline/taxonomy.py` reads each `##` section as `{alias: ca
 | webinar | Event |
 | conference | Event |
 | trade show | Event |
-| event | Event |
-| partner | Partner |
 | reseller | Partner |
 | referral partner | Partner |
-| marketplace | Marketplace |
 | app marketplace | Marketplace |
-| outbound | Outbound |
 | cold call | Outbound |
 | sales prospecting | Outbound |
-| inbound | Inbound |
 | organic search | Inbound |
 | website | Inbound |
 | content download | Content |
 | ebook | Content |
 | whitepaper | Content |
-| customer referral | Customer Referral |
 
 ## Status
 
-| Alias | Canonical |
-|---|---|
-| new | New |
-| fresh | New |
-| contacted | Contacted |
-| attempted contact | Contacted |
-| accepted | Accepted |
-| sales accepted | Accepted |
-| qualified | Qualified |
-| marketing qualified | Qualified |
-| mql | Qualified |
-| nurture | Nurture |
-| long-term follow-up | Nurture |
-| in progress | In Progress |
-| working | In Progress |
-| rejected | Rejected |
-| disqualified | Rejected |
-| lost | Lost |
-| closed lost | Lost |
-| won | Won |
-| converted | Won |
+Do not map statuses here. Legal values come from the Salesforce picklist. Hygiene never rewrites a sales stage.
 
 ## Consent
 

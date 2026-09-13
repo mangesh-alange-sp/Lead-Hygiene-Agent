@@ -218,7 +218,7 @@ class EveryRowHeldTests(unittest.TestCase):
 
 
 class ChunkedQuarantineTests(unittest.TestCase):
-    """A held row in one batch must not cost the other batches."""
+    """A held row must not cost the rest of a large file."""
 
     COUNT = CHUNK_SIZE + 5
 
@@ -229,7 +229,7 @@ class ChunkedQuarantineTests(unittest.TestCase):
     def test_every_other_batch_is_still_delivered(self):
         result = self._run()
         self.assertEqual(result["status"], "ok", result.get("message"))
-        self.assertEqual(result["summary"]["chunk_count"], 2)
+        self.assertEqual(result["summary"]["chunk_count"], 1)
         self.assertEqual(result["rows_held_for_review"], 1)
         self.assertEqual(result["leads_out"], self.COUNT - 1)
         self.assertEqual(
@@ -237,10 +237,9 @@ class ChunkedQuarantineTests(unittest.TestCase):
         )
 
     def test_the_batch_lines_report_the_hold(self):
-        lines = self._run()["summary"]["chunk_lines"]
-        self.assertEqual(len(lines), 2)
-        self.assertTrue(any("1 held for review" in line for line in lines))
-        self.assertTrue(any("0 held for review" in line for line in lines))
+        summary = self._run()["summary"]
+        self.assertEqual(summary["totals"]["rows_held_for_review"], 1)
+        self.assertTrue(any(DIRTY_ID in line for line in summary["held_for_review_lines"]))
 
     def test_one_review_file_covers_every_batch(self):
         result = self._run()

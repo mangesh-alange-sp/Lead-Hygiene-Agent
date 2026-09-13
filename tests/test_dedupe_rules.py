@@ -236,6 +236,38 @@ class SignalRules(unittest.TestCase):
         self.assertIn("name+company", result["signals"])
         self.assertTrue(result["auto_merge"])
 
+    def test_same_name_and_phone_different_company_is_review_not_merge(self):
+        result = score_pair(
+            _record("00Q1", "Natalie", "Baggio", "nbaggio@lakeland.org", "2699838300", "Lakeland Health"),
+            _record("00Q2", "Natalie", "Baggio", "nbaggio@corewell.org", "2699838300", "Corewell Health"),
+        )
+        self.assertIn("name+phone", result["signals"])
+        self.assertIn("weak_company", result["signals"])
+        self.assertFalse(result["auto_merge"])
+        self.assertTrue(result["hitl"])
+        records = [
+            _record("00Q1", "Natalie", "Baggio", "nbaggio@lakeland.org", "2699838300", "Lakeland Health"),
+            _record("00Q2", "Natalie", "Baggio", "nbaggio@corewell.org", "2699838300", "Corewell Health"),
+        ]
+        survivors, merge_log = dedupe_leads(records)
+        self.assertEqual(len(survivors), 2)
+        self.assertTrue(all(s["hitl_review"] == "Yes" for s in survivors))
+        self.assertFalse(any(entry.get("merged_from_ids") for entry in merge_log))
+        self.assertTrue(any(entry["decision"] == "hitl_review" for entry in merge_log))
+
+    def test_same_name_and_phone_same_company_still_merges(self):
+        records = [
+            _record("00Q1", "Natalie", "Baggio", "n.baggio@corewell.org", "2699838300", "Corewell Health"),
+            _record("00Q2", "Natalie", "Baggio", "natalie.baggio@corewell.org", "2699838300", "Corewell Health"),
+        ]
+        result = score_pair(records[0], records[1])
+        self.assertIn("name+phone", result["signals"])
+        self.assertNotIn("weak_company", result["signals"])
+        self.assertTrue(result["auto_merge"])
+        survivors, merge_log = dedupe_leads(records)
+        self.assertEqual(len(survivors), 1)
+        self.assertTrue(any(entry.get("merged_from_ids") for entry in merge_log))
+
     def test_shared_company_switchboard_does_not_merge(self):
         result = score_pair(
             _record("00Q1", "Jane", "Doe", "jane@amazon.com", "2065550100", "Amazon"),

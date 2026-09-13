@@ -1,0 +1,951 @@
+{
+  "source": "mock",
+  "fields": {
+    "Industry": {
+      "restricted": true,
+      "controller": "",
+      "options": [
+        {
+          "value": "Agriculture",
+          "label": "Agriculture",
+          "active": true
+        },
+        {
+          "value": "Apparel",
+          "label": "Apparel",
+          "active": true
+        },
+        {
+          "value": "Banking",
+          "label": "Banking",
+          "active": true
+        },
+        {
+          "value": "Biotechnology",
+          "label": "Biotechnology",
+          "active": true
+        },
+        {
+          "value": "Chemicals",
+          "label": "Chemicals",
+          "active": true
+        },
+        {
+          "value": "Communications",
+          "label": "Communications",
+          "active": true
+        },
+        {
+          "value": "Construction",
+          "label": "Construction",
+          "active": true
+        },
+        {
+          "value": "Consulting",
+          "label": "Consulting",
+          "active": true
+        },
+        {
+          "value": "Education",
+          "label": "Education",
+          "active": true
+        },
+        {
+          "value": "Electronics",
+          "label": "Electronics",
+          "active": true
+        },
+        {
+          "value": "Energy",
+          "label": "Energy",
+          "active": true
+        },
+        {
+          "value": "Engineering",
+          "label": "Engineering",
+          "active": true
+        },
+        {
+          "value": "Entertainment",
+          "label": "Entertainment",
+          "active": true
+        },
+        {
+          "value": "Environmental",
+          "label": "Environmental",
+          "active": true
+        },
+        {
+          "value": "Finance",
+          "label": "Finance",
+          "active": true
+        },
+        {
+          "value": "Food & Beverage",
+          "label": "Food & Beverage",
+          "active": true
+        },
+        {
+          "value": "Government",
+          "label": "Government",
+          "active": true
+        },
+        {
+          "value": "Healthcare",
+          "label": "Healthcare",
+          "active": true
+        },
+        {
+          "value": "Hospitality",
+          "label": "Hospitality",
+          "active": true
+        },
+        {
+          "value": "Insurance",
+          "label": "Insurance",
+          "active": true
+        },
+        {
+          "value": "Machinery",
+          "label": "Machinery",
+          "active": true
+        },
+        {
+          "value": "Manufacturing",
+          "label": "Manufacturing",
+          "active": true
+        },
+        {
+          "value": "Media",
+          "label": "Media",
+          "active": true
+        },
+        {
+          "value": "Not For Profit",
+          "label": "Not For Profit",
+          "active": true
+        },
+        {
+          "value": "Recreation",
+          "label": "Recreation",
+          "active": true
+        },
+        {
+          "value": "Retail",
+          "label": "Retail",
+          "active": true
+        },
+        {
+          "value": "Shipping",
+          "label": "Shipping",
+          "active": true
+        },
+        {
+          "value": "Technology",
+          "label": "Technology",
+          "active": true
+        },
+        {
+          "value": "Telecommunications",
+          "label": "Telecommunications",
+          "active": true
+        },
+        {
+          "value": "Transportation",
+          "label": "Transportation",
+          "active": true
+        },
+        {
+          "value": "Utilities",
+          "label": "Utilities",
+          "active": true
+        },
+        {
+          "value": "Other",
+          "label": "Other",
+          "active": true
+        },
+        {
+          "value": "Semiconductor",
+          "label": "Semiconductor",
+          "active": true
+        },
+        {
+          "value": "Financial Services",
+          "label": "Financial Services",
+          "active": true
+        },
+        {
+          "value": "Energy & Utilities",
+          "label": "Energy & Utilities",
+          "active": true
+        },
+        {
+          "value": "Real Estate & Construction",
+          "label": "Real Estate & Construction",
+          "active": true
+        },
+        {
+          "value": "Professional Services",
+          "label": "Professional Services",
+          "active": true
+        },
+        {
+          "value": "Aerospace & Defense",
+          "label": "Aerospace & Defense",
+          "active": true
+        },
+        {
+          "value": "Transportation & Logistics",
+          "label": "Transportation & Logistics",
+          "active": true
+        },
+        {
+          "value": "Media & Entertainment",
+          "label": "Media & Entertainment",
+          "active": true
+        },
+        {
+          "value": "Non-Profit",
+          "label": "Non-Profit",
+          "active": true
+        },
+        {
+          "value": "Legal",
+          "label": "Legal",
+          "active": true
+        },
+        {
+          "value": "Advertising & Marketing",
+          "label": "Advertising & Marketing",
+          "active": true
+        },
+        {
+          "value": "Agriculture & Forestry",
+          "label": "Agriculture & Forestry",
+          "active": true
+        },
+        {
+          "value": "Automotive",
+          "label": "Automotive",
+          "active": true
+        },
+        {
+          "value": "Business Intelligence (BI) Software",
+          "label": "Business Intelligence (BI) Software",
+          "active": true
+        },
+        {
+          "value": "Business Services",
+          "label": "Business Services",
+          "active": true
+        },
+        {
+          "value": "Chemicals & Related Products",
+          "label": "Chemicals & Related Products",
+          "active": true
+        },
+        {
+          "value": "Commercial & Residential Construction",
+          "label": "Commercial & Residential Construction",
+          "active": true
+        },
+        {
+          "value": "Consumer Services",
+          "label": "Consumer Services",
+          "active": true
+        },
+        {
+          "value": "Custom Software & IT Services",
+          "label": "Custom Software & IT Services",
+          "active": true
+        },
+        {
+          "value": "Customer Relationship Management (CRM) Software",
+          "label": "Customer Relationship Management (CRM) Software",
+          "active": true
+        },
+        {
+          "value": "Energy, Utilities & Waste",
+          "label": "Energy, Utilities & Waste",
+          "active": true
+        },
+        {
+          "value": "Freight & Logistics Services",
+          "label": "Freight & Logistics Services",
+          "active": true
+        },
+        {
+          "value": "Government Administration",
+          "label": "Government Administration",
+          "active": true
+        },
+        {
+          "value": "Healthcare Services",
+          "label": "Healthcare Services",
+          "active": true
+        },
+        {
+          "value": "Healthcare and Medical",
+          "label": "Healthcare and Medical",
+          "active": true
+        },
+        {
+          "value": "Holding Companies",
+          "label": "Holding Companies",
+          "active": true
+        },
+        {
+          "value": "Holding Companies & Conglomerates",
+          "label": "Holding Companies & Conglomerates",
+          "active": true
+        },
+        {
+          "value": "Hospitals & Physicians Clinics",
+          "label": "Hospitals & Physicians Clinics",
+          "active": true
+        },
+        {
+          "value": "Household Goods",
+          "label": "Household Goods",
+          "active": true
+        },
+        {
+          "value": "Media & Internet",
+          "label": "Media & Internet",
+          "active": true
+        },
+        {
+          "value": "Motor Vehicles",
+          "label": "Motor Vehicles",
+          "active": true
+        },
+        {
+          "value": "Organizations",
+          "label": "Organizations",
+          "active": true
+        },
+        {
+          "value": "Pharmaceuticals",
+          "label": "Pharmaceuticals",
+          "active": true
+        },
+        {
+          "value": "Presta\u00e7\u00e3o de Servi\u00e7os",
+          "label": "Presta\u00e7\u00e3o de Servi\u00e7os",
+          "active": true
+        },
+        {
+          "value": "Professional & Technical Services",
+          "label": "Professional & Technical Services",
+          "active": true
+        },
+        {
+          "value": "Public Sector",
+          "label": "Public Sector",
+          "active": true
+        },
+        {
+          "value": "Real Estate",
+          "label": "Real Estate",
+          "active": true
+        },
+        {
+          "value": "Software",
+          "label": "Software",
+          "active": true
+        },
+        {
+          "value": "Software and Technology",
+          "label": "Software and Technology",
+          "active": true
+        },
+        {
+          "value": "Staffing & Recruiting",
+          "label": "Staffing & Recruiting",
+          "active": true
+        },
+        {
+          "value": "Telephony & Wireless",
+          "label": "Telephony & Wireless",
+          "active": true
+        },
+        {
+          "value": "Training",
+          "label": "Training",
+          "active": true
+        }
+      ]
+    },
+    "LeadSource": {
+      "restricted": true,
+      "controller": "",
+      "options": [
+        {
+          "value": "Web",
+          "label": "Web",
+          "active": true
+        },
+        {
+          "value": "Phone Inquiry",
+          "label": "Phone Inquiry",
+          "active": true
+        },
+        {
+          "value": "Partner Referral",
+          "label": "Partner Referral",
+          "active": true
+        },
+        {
+          "value": "Purchased List",
+          "label": "Purchased List",
+          "active": true
+        },
+        {
+          "value": "Other",
+          "label": "Other",
+          "active": true
+        },
+        {
+          "value": "Event",
+          "label": "Event",
+          "active": true
+        },
+        {
+          "value": "Partner",
+          "label": "Partner",
+          "active": true
+        },
+        {
+          "value": "Marketplace",
+          "label": "Marketplace",
+          "active": true
+        },
+        {
+          "value": "Outbound",
+          "label": "Outbound",
+          "active": true
+        },
+        {
+          "value": "Inbound",
+          "label": "Inbound",
+          "active": true
+        },
+        {
+          "value": "Content",
+          "label": "Content",
+          "active": true
+        },
+        {
+          "value": "Customer Referral",
+          "label": "Customer Referral",
+          "active": true
+        },
+        {
+          "value": "Definitive Healthcare Database 011620",
+          "label": "Definitive Healthcare Database 011620",
+          "active": true
+        },
+        {
+          "value": "DiscoverOrg",
+          "label": "DiscoverOrg",
+          "active": true
+        },
+        {
+          "value": "Email",
+          "label": "Email",
+          "active": true
+        },
+        {
+          "value": "IDG Leads",
+          "label": "IDG Leads",
+          "active": true
+        },
+        {
+          "value": "IGA Workshop Target List_Ola",
+          "label": "IGA Workshop Target List_Ola",
+          "active": true
+        },
+        {
+          "value": "Jigsaw",
+          "label": "Jigsaw",
+          "active": true
+        },
+        {
+          "value": "MDR",
+          "label": "MDR",
+          "active": true
+        },
+        {
+          "value": "OverWatchID Open Opps",
+          "label": "OverWatchID Open Opps",
+          "active": true
+        },
+        {
+          "value": "RainKing",
+          "label": "RainKing",
+          "active": true
+        },
+        {
+          "value": "Sales Rep",
+          "label": "Sales Rep",
+          "active": true
+        },
+        {
+          "value": "Syndication",
+          "label": "Syndication",
+          "active": true
+        },
+        {
+          "value": "Webinar",
+          "label": "Webinar",
+          "active": true
+        },
+        {
+          "value": "ZoomInfo",
+          "label": "ZoomInfo",
+          "active": true
+        },
+        {
+          "value": "website",
+          "label": "website",
+          "active": true
+        }
+      ]
+    },
+    "Status": {
+      "restricted": true,
+      "controller": "",
+      "options": [
+        {
+          "value": "Open - Not Contacted",
+          "label": "Open - Not Contacted",
+          "active": true
+        },
+        {
+          "value": "Working - Contacted",
+          "label": "Working - Contacted",
+          "active": true
+        },
+        {
+          "value": "Closed - Converted",
+          "label": "Closed - Converted",
+          "active": true
+        },
+        {
+          "value": "Closed - Not Converted",
+          "label": "Closed - Not Converted",
+          "active": true
+        },
+        {
+          "value": "New",
+          "label": "New",
+          "active": true
+        },
+        {
+          "value": "Contacted",
+          "label": "Contacted",
+          "active": true
+        },
+        {
+          "value": "Accepted",
+          "label": "Accepted",
+          "active": true
+        },
+        {
+          "value": "Qualified",
+          "label": "Qualified",
+          "active": true
+        },
+        {
+          "value": "Nurture",
+          "label": "Nurture",
+          "active": true
+        },
+        {
+          "value": "In Progress",
+          "label": "In Progress",
+          "active": true
+        },
+        {
+          "value": "Rejected",
+          "label": "Rejected",
+          "active": true
+        },
+        {
+          "value": "Lost",
+          "label": "Lost",
+          "active": true
+        },
+        {
+          "value": "Won",
+          "label": "Won",
+          "active": true
+        },
+        {
+          "value": "Denied",
+          "label": "Denied",
+          "active": true
+        },
+        {
+          "value": "Disqualified \u2013 No Opportunity",
+          "label": "Disqualified \u2013 No Opportunity",
+          "active": true
+        },
+        {
+          "value": "Disqualified, Dead",
+          "label": "Disqualified, Dead",
+          "active": true
+        },
+        {
+          "value": "Disqualified, No Longer at Company",
+          "label": "Disqualified, No Longer at Company",
+          "active": true
+        },
+        {
+          "value": "Open",
+          "label": "Open",
+          "active": true
+        },
+        {
+          "value": "Qualified, Existing Opportunity",
+          "label": "Qualified, Existing Opportunity",
+          "active": true
+        },
+        {
+          "value": "Qualified, No Opportunity",
+          "label": "Qualified, No Opportunity",
+          "active": true
+        }
+      ]
+    },
+    "Country": {
+      "restricted": true,
+      "controller": "",
+      "options": [
+        {
+          "value": "United States",
+          "label": "United States",
+          "active": true
+        },
+        {
+          "value": "Canada",
+          "label": "Canada",
+          "active": true
+        },
+        {
+          "value": "United Kingdom",
+          "label": "United Kingdom",
+          "active": true
+        },
+        {
+          "value": "Germany",
+          "label": "Germany",
+          "active": true
+        },
+        {
+          "value": "France",
+          "label": "France",
+          "active": true
+        },
+        {
+          "value": "Italy",
+          "label": "Italy",
+          "active": true
+        },
+        {
+          "value": "Spain",
+          "label": "Spain",
+          "active": true
+        },
+        {
+          "value": "Netherlands",
+          "label": "Netherlands",
+          "active": true
+        },
+        {
+          "value": "Belgium",
+          "label": "Belgium",
+          "active": true
+        },
+        {
+          "value": "Switzerland",
+          "label": "Switzerland",
+          "active": true
+        },
+        {
+          "value": "Austria",
+          "label": "Austria",
+          "active": true
+        },
+        {
+          "value": "Sweden",
+          "label": "Sweden",
+          "active": true
+        },
+        {
+          "value": "Norway",
+          "label": "Norway",
+          "active": true
+        },
+        {
+          "value": "Denmark",
+          "label": "Denmark",
+          "active": true
+        },
+        {
+          "value": "Finland",
+          "label": "Finland",
+          "active": true
+        },
+        {
+          "value": "Poland",
+          "label": "Poland",
+          "active": true
+        },
+        {
+          "value": "Czech Republic",
+          "label": "Czech Republic",
+          "active": true
+        },
+        {
+          "value": "Ireland",
+          "label": "Ireland",
+          "active": true
+        },
+        {
+          "value": "Portugal",
+          "label": "Portugal",
+          "active": true
+        },
+        {
+          "value": "Greece",
+          "label": "Greece",
+          "active": true
+        },
+        {
+          "value": "Hungary",
+          "label": "Hungary",
+          "active": true
+        },
+        {
+          "value": "Romania",
+          "label": "Romania",
+          "active": true
+        },
+        {
+          "value": "India",
+          "label": "India",
+          "active": true
+        },
+        {
+          "value": "Japan",
+          "label": "Japan",
+          "active": true
+        },
+        {
+          "value": "South Korea",
+          "label": "South Korea",
+          "active": true
+        },
+        {
+          "value": "China",
+          "label": "China",
+          "active": true
+        },
+        {
+          "value": "Taiwan",
+          "label": "Taiwan",
+          "active": true
+        },
+        {
+          "value": "Hong Kong",
+          "label": "Hong Kong",
+          "active": true
+        },
+        {
+          "value": "Singapore",
+          "label": "Singapore",
+          "active": true
+        },
+        {
+          "value": "Malaysia",
+          "label": "Malaysia",
+          "active": true
+        },
+        {
+          "value": "Thailand",
+          "label": "Thailand",
+          "active": true
+        },
+        {
+          "value": "Philippines",
+          "label": "Philippines",
+          "active": true
+        },
+        {
+          "value": "Indonesia",
+          "label": "Indonesia",
+          "active": true
+        },
+        {
+          "value": "Vietnam",
+          "label": "Vietnam",
+          "active": true
+        },
+        {
+          "value": "Australia",
+          "label": "Australia",
+          "active": true
+        },
+        {
+          "value": "New Zealand",
+          "label": "New Zealand",
+          "active": true
+        },
+        {
+          "value": "Brazil",
+          "label": "Brazil",
+          "active": true
+        },
+        {
+          "value": "Mexico",
+          "label": "Mexico",
+          "active": true
+        },
+        {
+          "value": "Argentina",
+          "label": "Argentina",
+          "active": true
+        },
+        {
+          "value": "Chile",
+          "label": "Chile",
+          "active": true
+        },
+        {
+          "value": "South Africa",
+          "label": "South Africa",
+          "active": true
+        },
+        {
+          "value": "Egypt",
+          "label": "Egypt",
+          "active": true
+        },
+        {
+          "value": "Nigeria",
+          "label": "Nigeria",
+          "active": true
+        },
+        {
+          "value": "Kenya",
+          "label": "Kenya",
+          "active": true
+        },
+        {
+          "value": "United Arab Emirates",
+          "label": "United Arab Emirates",
+          "active": true
+        },
+        {
+          "value": "Saudi Arabia",
+          "label": "Saudi Arabia",
+          "active": true
+        },
+        {
+          "value": "Israel",
+          "label": "Israel",
+          "active": true
+        },
+        {
+          "value": "Turkey",
+          "label": "Turkey",
+          "active": true
+        },
+        {
+          "value": "Pakistan",
+          "label": "Pakistan",
+          "active": true
+        },
+        {
+          "value": "Bangladesh",
+          "label": "Bangladesh",
+          "active": true
+        },
+        {
+          "value": "Sri Lanka",
+          "label": "Sri Lanka",
+          "active": true
+        },
+        {
+          "value": "Russia",
+          "label": "Russia",
+          "active": true
+        }
+      ]
+    },
+    "State": {
+      "restricted": true,
+      "controller": "Country",
+      "options": [
+        {
+          "value": "Texas",
+          "label": "Texas",
+          "active": true,
+          "validForCountries": [
+            "United States"
+          ]
+        },
+        {
+          "value": "California",
+          "label": "California",
+          "active": true,
+          "validForCountries": [
+            "United States"
+          ]
+        },
+        {
+          "value": "New York",
+          "label": "New York",
+          "active": true,
+          "validForCountries": [
+            "United States"
+          ]
+        },
+        {
+          "value": "Washington",
+          "label": "Washington",
+          "active": true,
+          "validForCountries": [
+            "United States"
+          ]
+        },
+        {
+          "value": "Massachusetts",
+          "label": "Massachusetts",
+          "active": true,
+          "validForCountries": [
+            "United States"
+          ]
+        },
+        {
+          "value": "Ontario",
+          "label": "Ontario",
+          "active": true,
+          "validForCountries": [
+            "Canada"
+          ]
+        },
+        {
+          "value": "British Columbia",
+          "label": "British Columbia",
+          "active": true,
+          "validForCountries": [
+            "Canada"
+          ]
+        }
+      ]
+    }
+  }
+}

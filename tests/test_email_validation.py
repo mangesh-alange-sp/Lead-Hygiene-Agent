@@ -7,7 +7,9 @@ so results are deterministic and do not depend on DNS.
 
 import csv
 import io
+import os
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -87,6 +89,17 @@ class DeliverabilityRules(unittest.TestCase):
             emailcheck.domain_accepts_mail = original
         self.assertEqual(result["status"], UNKNOWN)
         self.assertEqual(result["value"], "jane@amazon.com")
+
+    def test_mx_lookups_are_off_unless_opted_in(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LEAD_HYGIENE_MX_LOOKUP", None)
+            self.assertFalse(emailcheck._lookups_enabled())
+        with patch.dict(os.environ, {"LEAD_HYGIENE_MX_LOOKUP": "1"}):
+            self.assertTrue(emailcheck._lookups_enabled())
+
+    def test_syntax_and_placeholders_still_clear_when_mx_is_off(self):
+        self.assertEqual(validate_lead_email("not-an-email")["value"], "")
+        self.assertEqual(validate_lead_email("pat@example.com")["value"], "")
 
 
 class LeadRecordRules(unittest.TestCase):

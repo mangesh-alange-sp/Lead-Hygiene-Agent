@@ -25,6 +25,7 @@ from .invariants import (
 )
 
 from .normalize import normalize_dataframe
+from .picklists import PicklistCatalogError, load_catalog
 from .domains import company_match_key, host_of
 from .phone import STATUS_NEEDS_REVIEW, excel_safe_international
 from .regression import as_dicts, diff_against_golden, format_changes
@@ -242,6 +243,19 @@ def _flag_counts(audit_rows: list) -> dict:
             if flag:
                 counts[flag] = counts.get(flag, 0) + 1
     return counts
+
+
+PICKLIST_UNMAPPED_FLAGS = (
+    "unmapped_industry", "unmapped_country", "unmapped_state",
+    "unmapped_lead_source", "unmapped_status",
+)
+IDENTITY_REVIEW_FLAGS = (
+    "low_confidence_match",
+)
+
+
+def _subset_flag_counts(flag_counts: dict, names) -> dict:
+    return {name: flag_counts[name] for name in names if flag_counts.get(name)}
 
 
 FIELD_HEADINGS = {
@@ -519,6 +533,7 @@ def _build_run_summary(source_df, writable, merge_log, audit_rows, counts) -> di
     omitted = max(0, sum(b["count"] for b in field_changes.values()) - len(change_list))
     sections = _normalization_sections(field_changes)
     routine = _routine_cleanup_line(field_changes)
+    flags = _flag_counts(audit_rows)
     return {
         "totals": {
             "leads_in": counts["leads_in"],
@@ -550,7 +565,9 @@ def _build_run_summary(source_df, writable, merge_log, audit_rows, counts) -> di
         "critical_lines": _critical_lines(sections, dropped, routine),
         "change_list": change_list,
         "changes_omitted": omitted,
-        "flag_counts": _flag_counts(audit_rows),
+        "flag_counts": flags,
+        "picklist_unmapped": _subset_flag_counts(flags, PICKLIST_UNMAPPED_FLAGS),
+        "identity_review": _subset_flag_counts(flags, IDENTITY_REVIEW_FLAGS),
         "directory": directory,
         "technical_log": counts.get("technical_log") or [],
         "phone_states": counts.get("phone_states") or {},
@@ -559,6 +576,10 @@ def _build_run_summary(source_df, writable, merge_log, audit_rows, counts) -> di
         "held_for_review": quarantine.get("rows") or [],
         "held_for_review_lines": quarantine.get("lines") or [],
         "held_for_review_reasons": quarantine.get("reason_counts") or {},
+        "chunk_count": 1,
+        "chunk_size": CHUNK_SIZE,
+        "chunk_note": "",
+        "chunk_lines": [],
     }
 
 
@@ -578,6 +599,14 @@ def format_run_summary(summary: dict) -> str:
         lines.append(f"Leads with no email (kept, not merged): {totals['blank_email_kept']}")
     if totals.get("hitl_records"):
         lines.append(f"HITL review: {totals['hitl_records']}")
+    picklist = summary.get("picklist_unmapped") or {}
+    if picklist:
+        parts = [f"{name} {count}" for name, count in picklist.items()]
+        lines.append("Unmapped dropdowns (not duplicate people): " + ", ".join(parts))
+    identity = summary.get("identity_review") or {}
+    if identity:
+        parts = [f"{name} {count}" for name, count in identity.items()]
+        lines.append("Possible duplicate-people review: " + ", ".join(parts))
     lines.append("dedup_log.csv is ready.")
     if totals.get("rows_held_for_review"):
         lines.append(
@@ -628,20 +657,21 @@ def _agent_facing_summary(summary: dict) -> dict:
     Slim payload for the model. merge_lines is first so it cannot be truncated
     behind the per-lead directory. The full summary stays in session state.
 
-    Chunked runs omit per-lead technical_log so the chat reply stays inside
+    Large runs omit per-lead technical_log so the chat reply stays inside
     the model output cap; those reasons remain in dedup_log.csv.
     """
-    chunked = int(summary.get("chunk_count") or 1) > 1
+    large = int((summary.get("totals") or {}).get("leads_in") or 0) > CHUNK_SIZE
     instruction = (
         "What changed must be copied from critical_lines only. "
         "Do not list company casing, industry maps, title expansions, "
         "https prefixes, or phone regrouping. Do not write "
-        "Company: N changes, e.g. Copy every merge_lines entry."
+        "Company: N changes, e.g. Copy every merge_lines entry. "
+        "Unmapped dropdowns (picklist_unmapped) are not the same as "
+        "possible duplicate-people reviews (identity_review)."
     )
-    if chunked:
+    if large:
         instruction += (
-            " This run was batched. Copy chunk_note and every chunk_lines "
-            "entry. Per-lead reasons are in dedup_log.csv; do not invent them."
+            " Per-lead change reasons are in dedup_log.csv; do not invent them."
         )
     held_lines = summary.get("held_for_review_lines") or []
     if held_lines:
@@ -662,12 +692,14 @@ def _agent_facing_summary(summary: dict) -> dict:
         "critical_lines": summary.get("critical_lines", []),
         "routine_cleanup": summary.get("routine_cleanup", ""),
         "flag_counts": summary.get("flag_counts", {}),
+        "picklist_unmapped": summary.get("picklist_unmapped", {}),
+        "identity_review": summary.get("identity_review", {}),
         "phone_states": summary.get("phone_states", {}),
-        "technical_log": [] if chunked else (summary.get("technical_log") or []),
-        "chunk_count": summary.get("chunk_count") or 1,
+        "technical_log": [] if large else (summary.get("technical_log") or []),
+        "chunk_count": 1,
         "chunk_size": summary.get("chunk_size") or CHUNK_SIZE,
-        "chunk_note": summary.get("chunk_note") or "",
-        "chunk_lines": summary.get("chunk_lines") or [],
+        "chunk_note": "",
+        "chunk_lines": [],
         "field_diffs": summary.get("field_diffs", []),
         "field_diff_lines": summary.get("field_diff_lines", []),
         "instruction": instruction,
@@ -881,13 +913,18 @@ def _merge_quarantines(parts: list) -> dict:
     }
 
 
-def process_csv(csv_text: str, accept_changes: bool = False) -> dict:
+def process_csv(
+    csv_text: str,
+    accept_changes: bool = False,
+    *,
+    check_regression: bool = True,
+) -> dict:
     """
     Run the pipeline end to end.
 
-    Pass accept_changes=True only to regenerate the known-good baseline; it is
-    the one way to get output past the regression gate, and it makes accepting a
-    diff an explicit act rather than an unnoticed one.
+    Pass accept_changes=True only to regenerate the known-good baseline.
+    check_regression is for tests and the CLI; the agent skips it so a
+    real Salesforce export is not blocked by the fixture golden file.
     """
     if len(csv_text) > MAX_CSV_CHARS:
         return {
@@ -911,6 +948,11 @@ def process_csv(csv_text: str, accept_changes: bool = False) -> dict:
             "status": "error",
             "message": f"CSV has more than {MAX_ROWS} rows. Split it into smaller batches.",
         }
+
+    try:
+        load_catalog(refresh=True)
+    except PicklistCatalogError as exc:
+        return {"status": "error", "message": str(exc)}
 
     leads_in = len(df)
     source_contacts = snapshot_email_phone(df.to_dict("records"))
@@ -1029,9 +1071,9 @@ def process_csv(csv_text: str, accept_changes: bool = False) -> dict:
             "invariant_violations": export_violations,
         }
 
-    field_changes = diff_against_golden(csv_text_out)
+    field_changes = diff_against_golden(csv_text_out) if check_regression else []
     field_diffs = as_dicts(field_changes)
-    if field_changes and not accept_changes:
+    if check_regression and field_changes and not accept_changes:
         return {
             "status": "error",
             "message": (
@@ -1263,35 +1305,11 @@ def _combine_chunk_results(parts: list, rows_in: int) -> dict:
 
 def process_csv_for_agent(csv_text: str) -> dict:
     """
-    Agent entry: same pipeline as process_csv, but files over CHUNK_SIZE rows
-    are sorted by email and run in batches of CHUNK_SIZE, then stitched.
+    Agent entry: the same full-file job as the CLI. Large files are not
+    split, so name+company and name+phone pairs cannot hide in different
+    batches. The fixture golden file is not applied.
     """
-    if len(csv_text) > MAX_CSV_CHARS:
-        return process_csv(csv_text)
-    try:
-        df = pd.read_csv(io.StringIO(csv_text), dtype=str, keep_default_na=False)
-    except Exception:
-        return process_csv(csv_text)
-    df = _clean_columns(df)
-    if "Email" not in df.columns or len(df) <= CHUNK_SIZE or len(df) > MAX_ROWS:
-        return process_csv(csv_text)
-
-    df = _sort_for_chunking(df)
-    parts = []
-    for index, start in enumerate(range(0, len(df), CHUNK_SIZE)):
-        chunk = df.iloc[start:start + CHUNK_SIZE]
-        chunk_csv = _write_salesforce_csv(chunk, list(chunk.columns))
-        result = process_csv(chunk_csv)
-        if result["status"] != "ok":
-            prefix = (
-                f"Batch {index + 1} (rows {start + 1}-"
-                f"{start + len(chunk)} of {len(df)}): "
-            )
-            result = dict(result)
-            result["message"] = prefix + (result.get("message") or "batch failed")
-            return result
-        parts.append(result)
-    return _combine_chunk_results(parts, rows_in=len(df))
+    return process_csv(csv_text, check_regression=False)
 
 
 async def run_dedup_pipeline(
@@ -1315,8 +1333,8 @@ async def run_dedup_pipeline(
     structured summary of every merge, drop, review flag, and field change
     so the agent can narrate the run and answer follow-up questions.
 
-    Files larger than CHUNK_SIZE rows are sorted by email and processed in
-    batches of CHUNK_SIZE, then written back as one combined file.
+    Files of any size (up to MAX_ROWS) are processed as one job so duplicates
+    cannot hide in different batches.
     """
     source = await _resolve_dedup_csv(csv_text, filename, tool_context)
     if source["status"] != "ok":

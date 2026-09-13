@@ -1,10 +1,8 @@
 # agent.py
 #
 # Canonical ADK agent for this repo. There is no fix/ / fix4/ tree here —
-# do not fork another copy. Validate the single-agent pipeline (including
-# the golden-fixture gate) before any multi-agent or A2A work. If that
-# expansion happens later, every agent must emit change-reason entries in
-# the same technical_log shape used here.
+# do not fork another copy. The golden-fixture gate is for CLI and tests
+# only; the agent runs the full CSV without that check.
 
 from google.adk.agents import Agent
 from google.adk.apps import App
@@ -84,9 +82,8 @@ analytical tone.
    itself. Only when the user typed a few rows straight into the chat
    and there is no uploaded file do you pass those rows as csv_text.
 1. Call run_dedup_pipeline exactly once.
-   Do not split, slice, or rewrite the CSV yourself. The tool batches
-   files larger than 200 rows internally (200-row slices, sorted by
-   email) and still writes one combined deduped.csv.
+   Do not split, slice, or rewrite the CSV yourself. The tool processes
+   the whole file as one job.
 2. If status is error: repeat the tool message, add a brief suggestion
    only when the cause is obvious (for example, "Please check the CSV
    formatting"), then STOP. Do not use the success template. If the
@@ -138,8 +135,6 @@ N row(s) held back for review, the rest were delivered.
 FILES
 deduped.csv is the write-back file (same columns as the upload).
 dedup_log.csv is the audit file.
-If summary.chunk_count is greater than 1, add one line: processed in
-N batches of 200. Copy summary.chunk_note exactly.
 If summary.totals.rows_held_for_review is greater than 0, add one line
 naming needs_review.csv as the file holding those rows and their
 reasons.
@@ -160,23 +155,25 @@ Otherwise list every summary.merge_lines entry as a bullet.
 
 NEEDS REVIEW
 If hitl_records is 0, write: None
-Otherwise summarize flag_counts in plain English
-(for example: 8 leads missing email, 3 phones could not be
-standardized). Do not list individual Salesforce Ids.
+Otherwise:
+- If summary.picklist_unmapped is not empty, write one line:
+  Unmapped dropdowns (not duplicate people), then those flag counts.
+- If summary.identity_review is not empty, write one line:
+  Possible duplicate-people review, then those flag counts.
+- Summarize any other flag_counts in plain English
+  (for example: 8 leads missing email, 3 phones could not be
+  standardized). Do not list individual Salesforce Ids.
 Always add one line from summary.phone_states, for example:
 "Phones: 74 validated to E.164, 9 need review."
 
 TECHNICAL LOG
-If summary.chunk_count is greater than 1: copy summary.chunk_note,
-then every summary.chunk_lines entry. Write: Per-lead change reasons
-are in dedup_log.csv. Do not invent per-lead log lines.
-Otherwise copy every summary.technical_log entry as: id — reasons
+Copy every summary.technical_log entry as: id — reasons
 (phone_status in parentheses when present).
+If the list is empty, write: Per-lead change reasons are in
+dedup_log.csv. Do not invent per-lead log lines.
 If summary.field_diff_lines is not empty, list every line verbatim and
 STOP — the write-back was blocked and needs review, so do not say the
 file is ready.
-If technical_log, chunk_lines, and field_diff_lines are all empty,
-write: None
 
 ## Enrichment output format
 
@@ -217,7 +214,7 @@ If you are asked to tell a joke, you can tell one.
 
 root_agent = Agent(
     name="lead_hygiene_agent",
-    model="gemini-2.5-flash",
+    model="gemini-3.6-flash",
     instruction=SYSTEM_PROMPT,
     tools=[
         FunctionTool(func=run_dedup_pipeline),

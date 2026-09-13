@@ -1,4 +1,4 @@
-"""Agent-only 200-row batching, and reading the upload instead of a paste."""
+"""Agent runs the whole file (no 200-row split) and reads the upload, not a paste."""
 
 import asyncio
 import csv
@@ -85,20 +85,20 @@ class AgentChunkingTests(unittest.TestCase):
         self.assertEqual(facing["chunk_count"], 1)
         self.assertEqual(len(facing["technical_log"]), CHUNK_SIZE)
 
-    def test_files_over_chunk_size_are_batched_and_stitched(self):
+    def test_files_over_chunk_size_are_still_one_job(self):
         rows = CHUNK_SIZE + 1
         result = process_csv_for_agent(_distinct_csv(rows))
         self.assertEqual(result["status"], "ok", result.get("message"))
         self.assertEqual(result["leads_in"], rows)
         self.assertEqual(result["leads_out"], rows)
-        self.assertEqual(result["summary"]["chunk_count"], 2)
-        self.assertEqual(len(result["summary"]["chunk_lines"]), 2)
+        self.assertEqual(result["summary"]["chunk_count"], 1)
+        self.assertEqual(result["summary"].get("chunk_lines") or [], [])
         out = pd.read_csv(io.StringIO(result["csv"]), dtype=str)
         self.assertEqual(len(out), rows)
         facing = _agent_facing_summary(result["summary"])
         self.assertEqual(facing["technical_log"], [])
-        self.assertEqual(facing["chunk_count"], 2)
-        self.assertIn("dedup_log.csv", facing["chunk_note"])
+        self.assertEqual(facing["chunk_count"], 1)
+        self.assertEqual(facing.get("chunk_note") or "", "")
 
     def test_cli_path_does_not_chunk(self):
         rows = CHUNK_SIZE + 1
@@ -117,6 +117,18 @@ class AgentChunkingTests(unittest.TestCase):
         self.assertEqual(result["duplicates_merged"], 1)
         self.assertEqual(result["leads_out"], rows - 1)
 
+    def test_agent_path_does_not_block_on_the_fixture_golden_file(self):
+        csv_in = (
+            "Id,FirstName,LastName,Email,Phone,Company,Country\n"
+            "00Q001,Pat,Lee,pat@otherco.example,4155550100,Other Co,US\n"
+        )
+        blocked = process_csv(csv_in)
+        self.assertEqual(blocked["status"], "error")
+        self.assertIn("regression gate", blocked.get("message", "").lower())
+        result = process_csv_for_agent(csv_in)
+        self.assertEqual(result["status"], "ok", result.get("message"))
+        self.assertEqual(result["leads_in"], 1)
+
 
 class AgentChunkingToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_tool_saves_one_combined_artifact(self):
@@ -125,7 +137,7 @@ class AgentChunkingToolTests(unittest.IsolatedAsyncioTestCase):
             _distinct_csv(CHUNK_SIZE + 1), tool_context=ctx
         )
         self.assertEqual(out["status"], "ok", out.get("message"))
-        self.assertEqual(out["summary"]["chunk_count"], 2)
+        self.assertEqual(out["summary"]["chunk_count"], 1)
         self.assertEqual(out["summary"]["technical_log"], [])
         self.assertIn("deduped.csv", ctx.saved)
         self.assertTrue(ctx.state.get("deduped_csv_ready"))

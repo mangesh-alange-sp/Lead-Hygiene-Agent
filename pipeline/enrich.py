@@ -649,7 +649,7 @@ def _normalize_industries(df: pd.DataFrame, stats: dict) -> None:
         if unknown:
             _add_review(
                 stats, df, idx,
-                "unknown industry (not on the canonical picklist)",
+                "unmapped industry (not on the Salesforce picklist)",
             )
 
 

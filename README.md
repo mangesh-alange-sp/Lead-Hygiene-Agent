@@ -11,7 +11,9 @@ Cleans Salesforce lead CSVs before write-back: **validate → normalize → dedu
 3. **Dedupe** — collapse true duplicates only. Auto-merge requires an identity signal:
    - exact email
    - same person at the same company
-   - same person + same phone
+   - same person + same phone **and** the same company
+
+Same name and phone at **different** companies is held for human review, not merged.
 4. **Invariants** — if a safety check fails, the run returns an error and writes nothing.
 
 Shared phone alone, weak name/company similarity, and “both rows look like test data” are not enough to merge. Every lead missing from write-back must be either an explicit test-data drop or absorbed into a survivor via email, phone, or name+company.
@@ -70,6 +72,20 @@ Id,FirstName,LastName,Email,Phone,Company,Title,Website,Industry,Country
 
 `Email` is required. Batches are capped at 5,000 rows / 2 million characters.
 
+Live MX lookups are **off** by default. Syntax errors and placeholder domains (`test.com`, `example.com`, …) are still cleared. A failed MX check never blanks a syntactically valid address; turn lookups on only if you want the `undeliverable` flag in `dedup_log.csv`:
+
+```bash
+LEAD_HYGIENE_MX_LOOKUP=1 python dedupe_cli.py path/to/leads.csv
+```
+
+After a run, check that the write-back still looks right:
+
+```bash
+.venv/bin/python -m pipeline.audit deduped.csv --source path/to/leads.csv --log dedup_log.csv
+```
+
+That reports row counts, leftover duplicate emails, leftover auto-merge pairs, and missing Ids (merge vs test-data drop).
+
 A sample file lives at `tests/fixtures/lead_data_with_duplicates.csv`.
 
 ## Run the ADK agent
@@ -106,14 +122,22 @@ pipeline/
   dedupe.py              # Identity-based merge
   invariants.py          # Production gate before write-back
   tools.py               # process_csv / ADK tools
+  audit.py               # Post-run count / leftover-merge check
 data/
-  pipeline_config.json   # Allowlists, aliases, dummy values
-  reference_taxonomy.md  # Title / company / industry maps
+  pipeline_config.json        # Allowlists, aliases, dummy values
+  reference_taxonomy.md      # Title / company nicknames; extra dropdown synonyms
+  salesforce_picklists.json  # Legal Industry / Country / State / LeadSource / Status values
 docs/
   PIPELINE_SAFETY.md     # Module boundaries and invariant rules
 ```
 
-Edit `data/pipeline_config.json` and `data/reference_taxonomy.md` to extend acronyms, company aliases, and nickname maps. Adding an allowlist entry is covered by the existing rule-based tests.
+Dropdown fields (Industry, Country, State, LeadSource, Status) use `data/salesforce_picklists.json` as the legal values; the taxonomy file only adds nicknames that the official labels would not catch. Without Salesforce, seed the mock from a Lead export:
+
+```bash
+.venv/bin/python -m pipeline.picklists seed path/to/leads.csv
+```
+
+That adds unique Status / LeadSource / Industry values from the file. Junk such as `missingQS` is skipped. Adding an allowlist entry is covered by the existing rule-based tests.
 
 ## Salesforce write-back
 

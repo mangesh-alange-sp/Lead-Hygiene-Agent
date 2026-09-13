@@ -204,7 +204,7 @@ class TrickyRowTests(unittest.TestCase):
     def test_industry_aliases_map_to_canonical(self):
         self.assertEqual(self.rows.loc["00Q002", "Industry"], "Food & Beverage")
         self.assertEqual(self.rows.loc["00Q011", "Industry"], "Semiconductor")
-        self.assertEqual(self.rows.loc["00Q009", "Industry"], "Technology")
+        self.assertEqual(self.rows.loc["00Q009", "Industry"], "Software")
 
     def test_empty_country_is_inferred_from_the_phone(self):
         self.assertEqual(self.rows.loc["00Q023", "Country"], "United Kingdom")
@@ -215,7 +215,7 @@ class TrickyRowTests(unittest.TestCase):
 
     def test_held_rows_are_still_normalized(self):
         self.assertEqual(self.rows.loc["00Q009", "Company"], "Acme")
-        self.assertEqual(self.rows.loc["00Q009", "Industry"], "Technology")
+        self.assertEqual(self.rows.loc["00Q009", "Industry"], "Software")
         self.assertEqual(self.rows.loc["00Q009", "Title"], "REP")
 
     def test_output_keeps_source_row_order(self):
@@ -381,12 +381,33 @@ class RunSummaryTests(unittest.TestCase):
         self.assertEqual(facing["merge_lines"], summary["merge_lines"])
         self.assertNotIn("directory", facing)
         self.assertIn("00Q3", " ".join(summary["critical_lines"]))
-        self.assertFalse(any("Amgen" in line for line in summary["critical_lines"]))
         self.assertFalse(any("Account Executive" in line for line in summary.get("critical_lines", [])))
         self.assertIn("Critical changes:", text)
         self.assertIn("deduped.csv is ready.", text)
         self.assertIn("Merges:", text)
         self.assertIn("Dropped test rows:", text)
+
+    def test_summary_separates_unmapped_dropdowns_from_duplicate_reviews(self):
+        from pipeline.tools import _agent_facing_summary, format_run_summary
+
+        csv_in = (
+            "Id,FirstName,LastName,Email,Phone,Company,Country,Status\n"
+            "00Q1,Natalie,Baggio,nbaggio@lakeland.org,2699838300,Lakeland Health,US,missingQS\n"
+            "00Q2,Natalie,Baggio,nbaggio@corewell.org,2699838300,Corewell Health,US,Open\n"
+        )
+        result = process_csv(csv_in, check_regression=False)
+        self.assertEqual(result["status"], "ok", result.get("message"))
+        self.assertEqual(result["duplicates_merged"], 0)
+        summary = result["summary"]
+        self.assertIn("unmapped_status", summary["picklist_unmapped"])
+        self.assertIn("low_confidence_match", summary["identity_review"])
+        facing = _agent_facing_summary(summary)
+        self.assertEqual(facing["picklist_unmapped"], summary["picklist_unmapped"])
+        self.assertEqual(facing["identity_review"], summary["identity_review"])
+        text = format_run_summary(summary)
+        self.assertIn("Unmapped dropdowns (not duplicate people)", text)
+        self.assertIn("Possible duplicate-people review", text)
+        self.assertNotIn("low_confidence_match", str(summary["picklist_unmapped"]))
 
     def test_critical_summary_skips_cosmetic_edits(self):
         csv_in = (

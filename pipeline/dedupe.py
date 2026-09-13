@@ -9,7 +9,7 @@ Guarantees (see tests/test_dedupe_rules.py):
   * len(survivors) <= len(records)
   * every surviving Id exists in the input
   * no two survivors share an identical normalized email
-  * auto-merge requires exact email, name+company, or name+phone
+  * auto-merge requires exact email, name+company, or name+phone at the same company
   * two test-data rows never merge unless they share an exact email
 """
 
@@ -188,7 +188,7 @@ def score_pair(row1, row2) -> dict:
         signals.append("name+email_local")
         score = max(score, 50)
 
-    if names_ok and c1 and c2 and not same_company and not same_phone and "exact_email" not in signals:
+    if names_ok and c1 and c2 and not same_company and "exact_email" not in signals:
         signals.append("weak_company")
 
     unique = list(dict.fromkeys(signals))
@@ -198,6 +198,14 @@ def score_pair(row1, row2) -> dict:
         auto_merge = False
     elif both_test:
         auto_merge = "exact_email" in unique
+    elif (
+        "name+phone" in unique
+        and "weak_company" in unique
+        and "exact_email" not in unique
+        and "name+company" not in unique
+    ):
+        # Same person-looking name and number, different employers: review, do not merge.
+        auto_merge = False
     else:
         auto_merge = bool(IDENTITY_SIGNALS.intersection(unique))
 

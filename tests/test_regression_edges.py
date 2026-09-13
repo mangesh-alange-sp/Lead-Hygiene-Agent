@@ -139,6 +139,15 @@ class RegressionDiffTests(unittest.TestCase):
         self.assertEqual(diff_records(baseline, current), [])
 
     def test_pipeline_blocks_delivery_when_a_field_changed(self):
+        golden = Path("tests/fixtures/golden_deduped.csv").read_text(encoding="utf-8")
+        # A title change survives normalization, so it reaches the diff gate.
+        tampered = golden.replace(",PM,", ",Director,", 1)
+        self.assertNotEqual(tampered, golden)
+        out = process_csv(tampered)
+        self.assertEqual(out["status"], "error")
+        self.assertTrue(out["field_diffs"])
+
+    def test_agent_path_does_not_block_on_the_fixture_golden_file(self):
         import asyncio
 
         from pipeline.tools import run_dedup_pipeline
@@ -153,14 +162,11 @@ class RegressionDiffTests(unittest.TestCase):
                 return 1
 
         golden = Path("tests/fixtures/golden_deduped.csv").read_text(encoding="utf-8")
-        # A title change survives normalization, so it reaches the diff gate.
         tampered = golden.replace(",PM,", ",Director,", 1)
-        self.assertNotEqual(tampered, golden)
         ctx = _Ctx()
         out = asyncio.run(run_dedup_pipeline(tampered, tool_context=ctx))
-        self.assertEqual(out["status"], "error")
-        self.assertTrue(out["field_diffs"])
-        self.assertEqual(ctx.saved, [], "no artifact may be saved on a blocked run")
+        self.assertEqual(out["status"], "ok", out.get("message"))
+        self.assertIn("deduped.csv", ctx.saved)
 
 
 class ChangeReasonTests(unittest.TestCase):

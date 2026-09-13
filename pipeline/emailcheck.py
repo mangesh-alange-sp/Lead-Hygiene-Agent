@@ -16,7 +16,9 @@ Two operational concerns are handled here so the pipeline stays deterministic:
     replacement. Only invalid syntax and configured placeholder/reserved
     domains are cleared here.
 
-Set LEAD_HYGIENE_MX_LOOKUP=0 to answer purely from cache (used by the tests).
+Set LEAD_HYGIENE_MX_LOOKUP=1 to do live MX lookups. Hygiene defaults to
+cache-only (or unknown when uncached) so batches are fast; failed MX never
+blanks a syntactically valid address anyway.
 """
 
 import json
@@ -45,7 +47,7 @@ _resolver = None
 
 
 def _lookups_enabled() -> bool:
-    return os.environ.get("LEAD_HYGIENE_MX_LOOKUP", "1") not in {"0", "false", "False"}
+    return os.environ.get("LEAD_HYGIENE_MX_LOOKUP", "0") in {"1", "true", "True"}
 
 
 def _load_cache() -> dict:
