@@ -135,5 +135,92 @@ class MismatchReview(unittest.TestCase):
         self.assertIn("email domain does not match Company", reasons)
 
 
+class ShapedFills(unittest.TestCase):
+    def tearDown(self):
+        if getattr(self, "_real", None):
+            enrich._lusha_post = self._real
+
+    def _install(self, handler):
+        self._real = enrich._lusha_post
+        enrich._lusha_post = handler
+
+    def test_new_lusha_phone_is_written_as_e164(self):
+        def api(url, payload):
+            results = []
+            for item in payload.get("contacts") or []:
+                results.append({
+                    "clientReferenceId": item["clientReferenceId"],
+                    "phones": [{"number": "+1 415-324-5678", "type": "work"}],
+                })
+            return {"status": "ok", "results": results, "billing": {"creditsCharged": 1}}
+
+        self._install(api)
+        df = _frame([
+            ["1", "Pat", "Smith", "pat@avari.com", "", "Avari",
+             "https://avari.com", "Tech", "1", "1", "", ""],
+        ])
+        out, _ = enrich.enrich_dataframe(df)
+        self.assertEqual(out.at[0, "Phone"], "+14153245678")
+
+    def test_existing_phone_is_not_reformated_by_enrich_shaping(self):
+        def api(url, payload):
+            return {"status": "ok", "results": [], "billing": {"creditsCharged": 0}}
+
+        self._install(api)
+        df = _frame([
+            ["1", "Pat", "Smith", "pat@avari.com", "+1 415-555-0100", "Avari",
+             "https://avari.com", "Tech", "1", "1", "", ""],
+        ])
+        out, _ = enrich.enrich_dataframe(df)
+        self.assertEqual(out.at[0, "Phone"], "+1 415-555-0100")
+
+    def test_zero_employee_count_is_not_written(self):
+        def api(url, payload):
+            results = []
+            for item in payload.get("companies") or []:
+                results.append({
+                    "clientReferenceId": item["clientReferenceId"],
+                    "employeeCount": {"exact": 0},
+                })
+            return {"status": "ok", "results": results, "billing": {"creditsCharged": 1}}
+
+        self._install(api)
+        df = _frame([
+            ["1", "Pat", "Smith", "pat@avari.com", "+14155550100", "Avari",
+             "https://avari.com", "Tech", "1", "", "", ""],
+        ])
+        out, stats = enrich.enrich_dataframe(df)
+        self.assertEqual(out.at[0, "NumberOfEmployees"], "")
+        reasons = " ".join(
+            "; ".join(item["reasons"]) for item in stats["enrichment_review"]
+        )
+        self.assertIn("employee count", reasons)
+
+    def test_placeholder_title_is_not_written(self):
+        def api(url, payload):
+            results = []
+            for item in payload.get("contacts") or []:
+                results.append({
+                    "clientReferenceId": item["clientReferenceId"],
+                    "jobTitle": {"title": "Other"},
+                })
+            return {"status": "ok", "results": results, "billing": {"creditsCharged": 1}}
+
+        self._install(api)
+        df = pd.DataFrame([{
+            "Id": "1", "FirstName": "Pat", "LastName": "Smith",
+            "Email": "pat@avari.com", "Phone": "+14155550100",
+            "Company": "Avari", "Website": "https://avari.com",
+            "Title": "", "Industry": "Tech",
+            "AnnualRevenue": "1", "NumberOfEmployees": "1",
+        }])
+        out, stats = enrich.enrich_dataframe(df)
+        self.assertEqual(out.at[0, "Title"], "")
+        reasons = " ".join(
+            "; ".join(item["reasons"]) for item in stats["enrichment_review"]
+        )
+        self.assertIn("placeholder", reasons)
+
+
 if __name__ == "__main__":
     unittest.main()

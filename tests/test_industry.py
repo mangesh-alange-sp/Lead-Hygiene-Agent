@@ -77,6 +77,54 @@ class PostEnrichIndustryTests(unittest.TestCase):
         out, _ = enrich.enrich_dataframe(df)
         self.assertEqual(out.at[0, "Industry"], "Transportation & Logistics")
 
+    def test_known_lusha_industry_label_maps_when_the_target_is_legal(self):
+        def api(url, payload):
+            results = []
+            for item in payload.get("companies") or []:
+                results.append({
+                    "clientReferenceId": item["clientReferenceId"],
+                    "industry": "Technology, Information & Media",
+                })
+            return {"status": "ok", "results": results, "billing": {"creditsCharged": 1}}
+
+        enrich._lusha_post = api
+        df = pd.DataFrame([{
+            "Id": "1", "FirstName": "Pat", "LastName": "Lee",
+            "Email": "pat@acme.com", "Phone": "+14155550100",
+            "Company": "Acme", "Website": "https://acme.com",
+            "Industry": "", "AnnualRevenue": "", "NumberOfEmployees": "10",
+        }])
+        out, stats = enrich.enrich_dataframe(df)
+        self.assertEqual(out.at[0, "Industry"], "Technology")
+        self.assertFalse(any(
+            "unmapped industry" in "; ".join(item["reasons"])
+            for item in stats["enrichment_review"]
+        ))
+
+    def test_unknown_lusha_industry_is_kept_and_reviewed(self):
+        def api(url, payload):
+            results = []
+            for item in payload.get("companies") or []:
+                results.append({
+                    "clientReferenceId": item["clientReferenceId"],
+                    "industry": "Underwater Basket Weaving",
+                })
+            return {"status": "ok", "results": results, "billing": {"creditsCharged": 1}}
+
+        enrich._lusha_post = api
+        df = pd.DataFrame([{
+            "Id": "1", "FirstName": "Pat", "LastName": "Lee",
+            "Email": "pat@acme.com", "Phone": "+14155550100",
+            "Company": "Acme", "Website": "https://acme.com",
+            "Industry": "", "AnnualRevenue": "", "NumberOfEmployees": "10",
+        }])
+        out, stats = enrich.enrich_dataframe(df)
+        self.assertEqual(out.at[0, "Industry"], "Underwater Basket Weaving")
+        reasons = " ".join(
+            "; ".join(item["reasons"]) for item in stats["enrichment_review"]
+        )
+        self.assertIn("unmapped industry", reasons)
+
 
 if __name__ == "__main__":
     unittest.main()

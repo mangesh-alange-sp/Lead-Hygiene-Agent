@@ -95,6 +95,14 @@ class ResolvePicklistTests(unittest.TestCase):
         self.assertEqual(webinar["value"], "Webinar")
         self.assertTrue(webinar["matched"])
 
+    def test_lusha_industry_label_maps_only_when_target_is_on_the_list(self):
+        result = resolve_picklist("Industry", "Technology, Information & Media")
+        self.assertEqual(result["value"], "Technology")
+        self.assertTrue(result["matched"])
+        oil = resolve_picklist("Industry", "Oil, Gas & Mining")
+        self.assertEqual(oil["value"], "Energy")
+        self.assertTrue(oil["matched"])
+
     def test_seed_skips_placeholders_and_existing_keys(self):
         from pipeline.picklists import seed_catalog_from_values, CACHE_PATH
         added = seed_catalog_from_values({
@@ -145,6 +153,52 @@ class NormalizePicklistFrameTests(unittest.TestCase):
         self.assertEqual(out.at[0, "Country"], "United States")
         self.assertEqual(out.at[0, "State"], "California")
         self.assertNotIn("unmapped_state", str(out.at[0, "data_quality_flags"]))
+
+
+class LiveCatalogTests(unittest.TestCase):
+    def test_refresh_loads_salesforce_when_credentials_are_set(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        payload = {
+            "fields": [
+                {
+                    "name": "Industry",
+                    "type": "picklist",
+                    "restrictedPicklist": True,
+                    "controllerName": None,
+                    "picklistValues": [
+                        {"value": "Technology", "label": "Technology", "active": True},
+                    ],
+                },
+            ]
+        }
+        handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        handle.close()
+        path = Path(handle.name)
+        env = {
+            "SALESFORCE_INSTANCE_URL": "https://example.my.salesforce.com",
+            "SALESFORCE_ACCESS_TOKEN": "token",
+        }
+        try:
+            with patch.dict(os.environ, env, clear=False):
+                with patch(
+                    "pipeline.salesforce_io.describe_lead", return_value=payload
+                ) as describe:
+                    reset_catalog()
+                    catalog = load_catalog(refresh=True, path=path)
+            describe.assert_called_once()
+            self.assertEqual(catalog["source"], "salesforce")
+            self.assertEqual(
+                [opt["value"] for opt in catalog["fields"]["Industry"]["options"]],
+                ["Technology"],
+            )
+        finally:
+            reset_catalog()
+            load_catalog(refresh=False)
+            path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

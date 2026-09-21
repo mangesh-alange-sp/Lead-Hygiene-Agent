@@ -892,27 +892,6 @@ def _quarantine_unwritable_rows(df_out: pd.DataFrame, source_cols) -> tuple:
     return kept.reset_index(drop=True), quarantine
 
 
-def _merge_quarantines(parts: list) -> dict:
-    ids, rows, lines, reason_counts = [], [], [], {}
-    csvs = []
-    for part in parts:
-        quarantine = part.get("quarantine") or {}
-        ids.extend(quarantine.get("ids") or [])
-        rows.extend(quarantine.get("rows") or [])
-        lines.extend(quarantine.get("lines") or [])
-        for reason, count in (quarantine.get("reason_counts") or {}).items():
-            reason_counts[reason] = reason_counts.get(reason, 0) + count
-        if quarantine.get("csv"):
-            csvs.append(quarantine["csv"])
-    return {
-        "ids": ids,
-        "rows": rows,
-        "lines": lines,
-        "reason_counts": reason_counts,
-        "csv": _concat_csv_documents(csvs) if csvs else "",
-    }
-
-
 def process_csv(
     csv_text: str,
     accept_changes: bool = False,
@@ -1125,180 +1104,6 @@ def process_csv(
         "field_diffs": field_diffs,
         "expected_headers": [_export_header(col) for col in source_cols],
         "file": "deduped.csv",
-        "summary": summary,
-    }
-
-
-def _sort_for_chunking(df: pd.DataFrame) -> pd.DataFrame:
-    """Put matching emails next to each other so a 200-row slice can still merge them."""
-    keys = []
-    extra = pd.DataFrame(index=df.index)
-    if "Email" in df.columns:
-        extra["_chunk_email"] = df["Email"].map(lambda value: cell(value).lower())
-        keys.append("_chunk_email")
-    if "Company" in df.columns:
-        extra["_chunk_company"] = df["Company"].map(lambda value: cell(value).lower())
-        keys.append("_chunk_company")
-    if "Id" in df.columns:
-        extra["_chunk_id"] = df["Id"].map(cell)
-        keys.append("_chunk_id")
-    if not keys:
-        return df
-    return df.join(extra).sort_values(keys, kind="stable").drop(columns=keys)
-
-
-def _concat_csv_documents(texts: list) -> str:
-    if not texts:
-        return ""
-    chunks = []
-    for index, text in enumerate(texts):
-        body = (text or "").lstrip("\ufeff")
-        if index == 0:
-            chunks.append(body.rstrip("\n"))
-            continue
-        lines = body.splitlines()
-        if len(lines) <= 1:
-            continue
-        chunks.append("\n".join(lines[1:]))
-    return "\n".join(chunks) + "\n"
-
-
-def _combine_chunk_results(parts: list, rows_in: int) -> dict:
-    columns = None
-    frames = []
-    for part in parts:
-        frame = pd.read_csv(io.StringIO(part["csv"]), dtype=str, keep_default_na=False)
-        if columns is None:
-            columns = list(frame.columns)
-        frames.append(frame.reindex(columns=columns).fillna(""))
-    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    csv_text_out = _write_salesforce_csv(combined, columns)
-    excel_csv = _write_excel_safe_csv(combined, columns)
-    audit_csv = _concat_csv_documents([part["audit_csv"] for part in parts])
-
-    def _sum(key):
-        return sum(part.get(key, 0) or 0 for part in parts)
-
-    phone_states = {}
-    flag_counts = {}
-    technical_log = []
-    merges, merge_lines, dropped, hitl, directory = [], [], [], [], []
-    critical_lines, field_diffs, field_diff_lines = [], [], []
-    chunk_lines = []
-    for index, part in enumerate(parts, start=1):
-        summary = part.get("summary") or {}
-        totals = summary.get("totals") or {}
-        tech = summary.get("technical_log") or []
-        technical_log.extend(tech)
-        merges.extend(summary.get("merges") or [])
-        merge_lines.extend(summary.get("merge_lines") or [])
-        dropped.extend(summary.get("dropped") or [])
-        hitl.extend(summary.get("hitl") or [])
-        directory.extend(summary.get("directory") or [])
-        critical_lines.extend(summary.get("critical_lines") or [])
-        field_diffs.extend(summary.get("field_diffs") or [])
-        field_diff_lines.extend(summary.get("field_diff_lines") or [])
-        for state, count in (summary.get("phone_states") or {}).items():
-            phone_states[state] = phone_states.get(state, 0) + count
-        for flag, count in (summary.get("flag_counts") or {}).items():
-            flag_counts[flag] = flag_counts.get(flag, 0) + count
-        held = len((part.get("quarantine") or {}).get("ids") or [])
-        chunk_lines.append(
-            f"Batch {index}/{len(parts)}: {totals.get('leads_in', part['leads_in'])} in, "
-            f"{totals.get('leads_out', part['leads_out'])} out, "
-            f"{totals.get('duplicates_merged', part['duplicates_merged'])} merged, "
-            f"{totals.get('records_dropped', part['records_dropped'])} dropped, "
-            f"{totals.get('hitl_records', part['hitl_records'])} HITL, "
-            f"{held} held for review, "
-            f"{len(tech)} log lines."
-        )
-
-    quarantine = _merge_quarantines(parts)
-    chunk_note = (
-        f"Processed in {len(parts)} batches of {CHUNK_SIZE} rows (sorted by email). "
-        "Duplicates that still sit in different batches were not merged. "
-        "Per-lead change reasons are in dedup_log.csv."
-    )
-    counts = {
-        "leads_in": rows_in,
-        "leads_out": len(combined),
-        "validation_issues": _sum("validation_issues"),
-        "values_normalized": _sum("values_normalized"),
-        "duplicates_merged": _sum("duplicates_merged"),
-        "records_dropped": _sum("records_dropped"),
-        "hitl_records": _sum("hitl_records"),
-        "blank_email_kept": _sum("blank_email_kept"),
-        "technical_log": technical_log,
-        "phone_states": phone_states,
-        "field_diffs": field_diffs,
-        "field_diff_lines": field_diff_lines,
-        "quarantine": quarantine,
-    }
-    first_files = [
-        entry for entry in ((parts[0].get("summary") or {}).get("files") or [])
-        if not entry.startswith(REVIEW_FILE)
-    ]
-    if quarantine["ids"]:
-        first_files = first_files + [
-            f"{REVIEW_FILE} — {len(quarantine['ids'])} row(s) held back from the "
-            "write-back with the reason attached"
-        ]
-    summary = {
-        "totals": {
-            "leads_in": counts["leads_in"],
-            "leads_out": counts["leads_out"],
-            "validation_issues": counts["validation_issues"],
-            "values_normalized": counts["values_normalized"],
-            "duplicates_merged": counts["duplicates_merged"],
-            "records_dropped": counts["records_dropped"],
-            "hitl_records": counts["hitl_records"],
-            "blank_email_kept": counts["blank_email_kept"],
-            "rows_held_for_review": len(quarantine["ids"]),
-        },
-        "files": first_files,
-        "merges": merges,
-        "merge_lines": merge_lines,
-        "dropped": dropped,
-        "hitl": hitl,
-        "directory": directory,
-        "critical_lines": critical_lines,
-        "routine_cleanup": "",
-        "flag_counts": flag_counts,
-        "technical_log": technical_log,
-        "phone_states": phone_states,
-        "field_diffs": field_diffs,
-        "field_diff_lines": field_diff_lines,
-        "held_for_review": quarantine["rows"],
-        "held_for_review_lines": quarantine["lines"],
-        "held_for_review_reasons": quarantine["reason_counts"],
-        "chunk_count": len(parts),
-        "chunk_size": CHUNK_SIZE,
-        "chunk_note": chunk_note,
-        "chunk_lines": chunk_lines,
-    }
-    return {
-        "status": "ok",
-        "csv": csv_text_out,
-        "excel_csv": excel_csv,
-        "excel_file": parts[0]["excel_file"],
-        "audit_csv": audit_csv,
-        "audit_file": parts[0]["audit_file"],
-        "review_csv": quarantine["csv"],
-        "review_file": REVIEW_FILE,
-        "rows_held_for_review": len(quarantine["ids"]),
-        "quarantine": quarantine,
-        "leads_in": counts["leads_in"],
-        "validation_issues": counts["validation_issues"],
-        "values_normalized": counts["values_normalized"],
-        "duplicates_merged": counts["duplicates_merged"],
-        "leads_out": counts["leads_out"],
-        "blank_email_kept": counts["blank_email_kept"],
-        "hitl_records": counts["hitl_records"],
-        "records_dropped": counts["records_dropped"],
-        "invariant_violations": [],
-        "field_diffs": field_diffs,
-        "expected_headers": parts[0].get("expected_headers") or [_export_header(col) for col in columns],
-        "file": parts[0]["file"],
         "summary": summary,
     }
 
@@ -1614,6 +1419,64 @@ def _enrichment_review_lines(reviews) -> list:
     return lines
 
 
+def enrich_csv(csv_text: str, audit_rows=None) -> dict:
+    """
+    Run Lusha enrichment on a hygiene write-back. Does not call Salesforce
+    except to refresh picklists when credentials are set.
+    """
+    parsed = _parse_lead_csv(csv_text)
+    if parsed["status"] != "ok":
+        return parsed
+
+    df = parsed["df"].fillna("")
+    source_cols = list(df.columns)
+    leads_in = len(df)
+    before = snapshot_email_phone(df.to_dict("records"))
+    df = _attach_hygiene_audit(df, audit_rows)
+    df_enriched, stats = enrich_dataframe(df)
+    if stats.get("error"):
+        return {"status": "error", "message": stats["error"]}
+
+    df_enriched = df_enriched.fillna("")
+    preserve_violations = check_enrich_preservation(
+        before,
+        df_enriched.to_dict("records"),
+        allowed_email_blank_ids=stats.get("email_blanked_no_replacement_ids"),
+    )
+    if preserve_violations:
+        return {
+            "status": "error",
+            "message": "Output blocked by invariant checks: "
+            + "; ".join(preserve_violations),
+            "invariant_violations": preserve_violations,
+        }
+    writable = df_enriched.reindex(columns=source_cols).fillna("")
+    output = io.StringIO()
+    writable.to_csv(output, index=False)
+    review_rows = stats.get("enrichment_review") or []
+    return {
+        "status": "ok",
+        "csv": output.getvalue(),
+        "review_csv": _enrichment_review_csv(review_rows),
+        "leads_in": leads_in,
+        "rows_attempted": stats["rows_attempted"],
+        "rows_matched": stats["rows_matched"],
+        "rows_not_found": stats["rows_not_found"],
+        "rows_skipped": stats["rows_skipped"],
+        "fields_filled": stats["fields_filled"],
+        "credits_charged": stats["credits_charged"],
+        "emails_rejected": stats.get("emails_rejected", 0),
+        "websites_rejected": stats.get("websites_rejected", 0),
+        "emails_blanked_no_replacement": len(
+            stats.get("email_blanked_no_replacement_ids") or []
+        ),
+        "revenue_range_rows": len(stats.get("revenue_ranges") or []),
+        "revenue_ranges": stats.get("revenue_ranges") or [],
+        "enrichment_review_lines": _enrichment_review_lines(review_rows),
+        "file": "enriched.csv",
+    }
+
+
 async def search_and_enrich(csv_text: str, tool_context: ToolContext) -> dict:
     """
     Enrich missing lead CSV fields with Lusha Search and Enrich.
@@ -1645,73 +1508,41 @@ async def search_and_enrich(csv_text: str, tool_context: ToolContext) -> dict:
     if loaded["status"] != "ok":
         return loaded
 
-    parsed = _parse_lead_csv(loaded["csv_text"])
-    if parsed["status"] != "ok":
-        return parsed
-
-    df = parsed["df"].fillna("")
-    source_cols = list(df.columns)
-    leads_in = len(df)
-    before = snapshot_email_phone(df.to_dict("records"))
-    df = _attach_hygiene_audit(df, tool_context.state.get("last_audit"))
-    df_enriched, stats = enrich_dataframe(df)
-    if stats.get("error"):
-        return {"status": "error", "message": stats["error"]}
-
-    df_enriched = df_enriched.fillna("")
-    preserve_violations = check_enrich_preservation(
-        before,
-        df_enriched.to_dict("records"),
-        allowed_email_blank_ids=stats.get("email_blanked_no_replacement_ids"),
-    )
-    if preserve_violations:
-        return {
-            "status": "error",
-            "message": "Output blocked by invariant checks: "
-            + "; ".join(preserve_violations),
-            "invariant_violations": preserve_violations,
-        }
-    writable = df_enriched.reindex(columns=source_cols).fillna("")
-    output = io.StringIO()
-    writable.to_csv(output, index=False)
-
-    review_rows = stats.get("enrichment_review") or []
-    review_csv = _enrichment_review_csv(review_rows)
-    review_lines = _enrichment_review_lines(review_rows)
+    result = enrich_csv(loaded["csv_text"], tool_context.state.get("last_audit"))
+    if result["status"] != "ok":
+        return result
 
     payload = {
         "status": "ok",
-        "leads_in": leads_in,
-        "rows_attempted": stats["rows_attempted"],
-        "rows_matched": stats["rows_matched"],
-        "rows_not_found": stats["rows_not_found"],
-        "rows_skipped": stats["rows_skipped"],
-        "fields_filled": stats["fields_filled"],
-        "credits_charged": stats["credits_charged"],
-        "emails_rejected": stats.get("emails_rejected", 0),
-        "websites_rejected": stats.get("websites_rejected", 0),
-        "emails_blanked_no_replacement": len(
-            stats.get("email_blanked_no_replacement_ids") or []
-        ),
-        "revenue_range_rows": len(stats.get("revenue_ranges") or []),
-        "revenue_ranges": stats.get("revenue_ranges") or [],
-        "enrichment_review_lines": review_lines,
+        "leads_in": result["leads_in"],
+        "rows_attempted": result["rows_attempted"],
+        "rows_matched": result["rows_matched"],
+        "rows_not_found": result["rows_not_found"],
+        "rows_skipped": result["rows_skipped"],
+        "fields_filled": result["fields_filled"],
+        "credits_charged": result["credits_charged"],
+        "emails_rejected": result["emails_rejected"],
+        "websites_rejected": result["websites_rejected"],
+        "emails_blanked_no_replacement": result["emails_blanked_no_replacement"],
+        "revenue_range_rows": result["revenue_range_rows"],
+        "revenue_ranges": result["revenue_ranges"],
+        "enrichment_review_lines": result["enrichment_review_lines"],
         "file": "enriched.csv",
     }
-    tool_context.state["fields_filled"] = stats["fields_filled"]
-    tool_context.state["leads_out"] = leads_in
+    tool_context.state["fields_filled"] = result["fields_filled"]
+    tool_context.state["leads_out"] = result["leads_in"]
 
     try:
         csv_part = types.Part.from_bytes(
-            data=output.getvalue().encode("utf-8"), mime_type="text/csv"
+            data=result["csv"].encode("utf-8"), mime_type="text/csv"
         )
         version = await tool_context.save_artifact(
             filename="enriched.csv", artifact=csv_part
         )
         payload["artifact_version"] = version
-        if review_csv:
+        if result.get("review_csv"):
             review_part = types.Part.from_bytes(
-                data=review_csv.encode("utf-8"), mime_type="text/csv"
+                data=result["review_csv"].encode("utf-8"), mime_type="text/csv"
             )
             await tool_context.save_artifact(
                 filename=ENRICH_REVIEW_FILE, artifact=review_part

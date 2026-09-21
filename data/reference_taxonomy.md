@@ -166,6 +166,14 @@ Nicknames only. Official Salesforce labels are matched from `data/salesforce_pic
 | f&b | Food & Beverage |
 | fmcg | Food & Beverage |
 | publishing | Media & Entertainment |
+| technology, information & media | Technology |
+| technology information and media | Technology |
+| community & nonprofit organizations | Non-Profit |
+| community and nonprofit organizations | Non-Profit |
+| retail & wholesale trade | Retail |
+| retail and wholesale trade | Retail |
+| oil, gas & mining | Energy |
+| oil gas and mining | Energy |
 
 ## Country
 

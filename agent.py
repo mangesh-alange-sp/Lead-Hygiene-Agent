@@ -189,7 +189,8 @@ Report credits_charged as billed by Lusha for this run.
 FILES
 enriched.csv is the enriched write-back file. deduped.csv is unchanged.
 If review_file is present, add one line naming enrichment_review.csv as
-the file holding rejected Lusha emails/websites and unvalidated emails
+the file holding rejected Lusha emails/websites, unmapped industries,
+rejected employee counts or placeholder titles, and unvalidated emails
 that could not be replaced.
 
 ENRICHMENT REVIEW

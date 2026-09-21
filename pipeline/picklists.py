@@ -94,7 +94,10 @@ def load_catalog(*, refresh: bool = False, path: Path = CACHE_PATH) -> dict:
     if refresh:
         from . import salesforce_io
         if salesforce_io.is_connected():
-            raw = salesforce_io.catalog_from_describe(salesforce_io.describe_lead())
+            try:
+                raw = salesforce_io.catalog_from_describe(salesforce_io.describe_lead())
+            except salesforce_io.SalesforceApiError as exc:
+                raise PicklistCatalogError(str(exc)) from exc
             save_catalog(raw, path)
             _CATALOG = _prepare_catalog(raw)
             return _CATALOG

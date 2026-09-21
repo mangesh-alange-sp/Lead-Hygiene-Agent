@@ -57,7 +57,14 @@ echo 'GOOGLE_API_KEY=your-key' > .env
 
 ## Run the CLI
 
-No LLM required. Writes `deduped.csv` and `dedup_log.csv`.
+No LLM required. Writes `deduped.csv` and `dedup_log.csv`. After that, fill blanks from Lusha:
+
+```bash
+python enrich_cli.py
+python enrich_cli.py path/to/deduped.csv path/to/enriched.csv
+```
+
+Needs `LUSHA_API_KEY`. Skips if `deduped.csv` is missing. New phones are formatted to E.164; unmapped industries, employee `0`, and placeholder titles go to `enrichment_review.csv`.
 
 ```bash
 python dedupe_cli.py path/to/leads.csv
@@ -96,7 +103,7 @@ From the parent of this package:
 adk web
 ```
 
-Upload or paste a lead CSV. The agent calls `run_dedup_pipeline` once, saves `deduped.csv` and `dedup_log.csv` as artifacts, and summarizes critical changes, merges, and HITL flags. Follow-up questions about a person or Id use `lookup_lead` against the last run.
+Upload or paste a lead CSV. The agent calls `run_dedup_pipeline` once, saves `deduped.csv` and `dedup_log.csv` as artifacts, and summarizes critical changes, merges, and HITL flags. Follow-up questions about a person or Id use `lookup_lead` against the last run. Full current behavior is in [docs/AGENT.md](docs/AGENT.md).
 
 ## Tests
 
@@ -115,7 +122,8 @@ Before changing a transformation, capture a baseline and declare which column th
 
 ```text
 agent.py                 # ADK router (Gemini); does not transform rows
-dedupe_cli.py            # Local runner
+dedupe_cli.py            # Local hygiene runner
+enrich_cli.py            # Local Lusha enrich runner
 pipeline/
   validate.py            # Quality flags, junk/test handling
   normalize.py           # Taxonomy and field formatting

@@ -25,7 +25,11 @@ from .domains import (
 )
 from .emailcheck import DELIVERABLE
 from .normalize import normalize_industry
+from .phone import STATUS_VALID, parse_phone
+from .picklists import PicklistCatalogError, load_catalog
 from .textnorm import BLANK_TOKENS, alias_key, email_domain
+
+WEAK_TITLES = frozenset({"other", "unknown", "n/a", "na", "none"})
 
 LUSHA_CONTACTS_URL = "https://api.lusha.com/v3/contacts/search-and-enrich"
 LUSHA_COMPANIES_URL = "https://api.lusha.com/v3/companies/search-and-enrich"
@@ -268,6 +272,71 @@ def _fill(df: pd.DataFrame, idx, field: str, new_value: str) -> int:
         return 0
     df.at[idx, col] = new_value
     return 1
+
+
+def _snapshot_shape_fields(df: pd.DataFrame) -> dict:
+    """Remember which Phone/Title/employee cells were blank before Lusha."""
+    snapshot = {}
+    for idx in df.index:
+        snapshot[idx] = {
+            "Phone": _cell(df.at[idx, col]) if (col := _actual_column(df.columns, "Phone")) else "x",
+            "Title": _cell(df.at[idx, col]) if (col := _actual_column(df.columns, "Title")) else "x",
+            "NumberOfEmployees": (
+                _cell(df.at[idx, col]) if (col := _actual_column(df.columns, "NumberOfEmployees")) else "x"
+            ),
+        }
+    return snapshot
+
+
+def _clear_new_value(df: pd.DataFrame, idx, field: str, stats: dict, reason: str) -> None:
+    col = _actual_column(df.columns, field)
+    if col is None:
+        return
+    df.at[idx, col] = ""
+    _add_review(stats, df, idx, reason)
+    stats["fields_filled"] = max(0, int(stats.get("fields_filled") or 0) - 1)
+
+
+def _shape_lusha_fills(df: pd.DataFrame, before: dict, stats: dict) -> None:
+    """
+    Format or drop values Lusha just wrote. Existing hygiene values stay put.
+    """
+    phone_col = _actual_column(df.columns, "Phone")
+    title_col = _actual_column(df.columns, "Title")
+    emp_col = _actual_column(df.columns, "NumberOfEmployees")
+    for idx, prior in before.items():
+        if phone_col is not None and not prior.get("Phone"):
+            raw = _cell(df.at[idx, phone_col])
+            if raw:
+                parsed = parse_phone(
+                    raw,
+                    email=_cell(df.at[idx, "Email"]) if "Email" in df.columns else "",
+                    company=_cell(df.at[idx, "Company"]) if "Company" in df.columns else "",
+                    country=_cell(df.at[idx, "Country"]) if "Country" in df.columns else "",
+                )
+                if parsed["status"] == STATUS_VALID:
+                    df.at[idx, phone_col] = parsed["value"]
+                else:
+                    _clear_new_value(
+                        df, idx, "Phone", stats,
+                        "rejected Lusha phone (not a usable E.164 number)",
+                    )
+        if title_col is not None and not prior.get("Title"):
+            raw = _cell(df.at[idx, title_col])
+            if raw and alias_key(raw) in WEAK_TITLES:
+                _clear_new_value(
+                    df, idx, "Title", stats,
+                    "rejected Lusha title (placeholder)",
+                )
+        if emp_col is not None and not prior.get("NumberOfEmployees"):
+            raw = _cell(df.at[idx, emp_col])
+            if raw:
+                digits = "".join(ch for ch in raw if ch.isdigit())
+                if not digits or int(digits) == 0:
+                    _clear_new_value(
+                        df, idx, "NumberOfEmployees", stats,
+                        "rejected Lusha employee count (zero or empty)",
+                    )
 
 
 def _fill_website(df: pd.DataFrame, idx, url, stats: dict) -> int:
@@ -614,7 +683,12 @@ def enrich_dataframe(df: pd.DataFrame) -> tuple:
         "websites_rejected": 0,
         "revenue_ranges": [],
     }
+    try:
+        load_catalog(refresh=True)
+    except PicklistCatalogError as exc:
+        return df, {**stats, "error": str(exc)}
 
+    before = _snapshot_shape_fields(df)
     company_sent, company_matched, error = _enrich_companies(df, stats)
     if error:
         return df, {**stats, "error": error}
@@ -630,6 +704,7 @@ def enrich_dataframe(df: pd.DataFrame) -> tuple:
     stats["rows_not_found"] = len(sent - matched)
     stats["rows_skipped"] = len(df) - len(sent)
     _normalize_industries(df, stats)
+    _shape_lusha_fills(df, before, stats)
     _flag_company_mismatches(df, stats)
     return df, stats
 
